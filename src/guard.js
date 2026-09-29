@@ -35,8 +35,9 @@
  */
 export const GUARD_LIMITATIONS = [
   '只检测带强后缀的机构名（某某公司/大学/银行…）；无后缀的机构名（如「字节跳动」）无法可靠识别，需人工确认。',
-  '只比对数字与机构/专名两类特征；新编造的「技能」「职责描述」等无数字文本无法自动识别。',
+  '只比对数字、机构/专名、职责动词强度、时间点四类特征；新编造的「技术栈」「项目背景」等无上述特征的文本无法自动识别。',
   '数字按 token 比对，不做语义判断：把「提升 40%」改成「提升四成」不会被发现。',
+  '职责升格检测基于中文动词词表，措辞避开词表的同义升格（如「深度参与」→「全权负责」以外的变体）可能漏检。',
 ]
 
 /** 守卫版本。判定规则变化时递增，便于回溯误报/漏报。 */
@@ -290,8 +291,116 @@ const EN_STOPWORDS = new Set(
   ].map((w) => w.toLowerCase()),
 )
 
+/**
+ * 提取时间点 token（年份、年月）。
+ *
+ * 用途：起止日期属于"绝不可改写"的事实字段。改写若动了年份，
+ * 会与背调信息不符——这类错误比编数字更冤枉（数字可能是表述问题，
+ * 日期错了就是硬伤）。
+ *
+ * 提取形态：
+ *   - 四位年份：2019、2024
+ *   - 年月：2019.06、2019-06、2019年6月
+ *
+ * @param {string} text 待提取文本
+ * @returns {Set<string>} 归一化时间点集合（统一为 `YYYY` 或 `YYYY-MM`）
+ */
+export function extractDateTokens(text) {
+  const out = new Set()
+  const src = normalizeText(text)
+  if (src === '') return out
+
+  // 先处理"年月"形态，避免被下面的裸年份规则重复计入
+  const consumed = []
+  const ymPatterns = [
+    /(\d{4})\s*[年.\-/]\s*(\d{1,2})\s*月?/g, // 2019年6月 / 2019.06 / 2019-6
+  ]
+  let masked = src
+  for (const re of ymPatterns) {
+    for (const m of masked.matchAll(re)) {
+      const year = m[1]
+      const month = String(Number(m[2])).padStart(2, '0')
+      const token = `${year}-${month}`
+      out.add(token)
+      consumed.push(m[0])
+    }
+  }
+  // 把已消费的年月片段替换掉，避免裸年份规则再抓一次
+  for (const frag of consumed) {
+    masked = masked.replace(frag, ' ')
+  }
+
+  // 裸年份（合理范围，避免把金额/百分比误当年份）
+  for (const m of masked.matchAll(/\b(19|20)\d{2}\b/g)) {
+    out.add(m[0])
+  }
+  return out
+}
+
 /** 全角数字转半角。 */
 const FULLWIDTH_DIGITS = '０１２３４５６７８９'
+
+/**
+ * 职责强度阶梯。
+ *
+ * 【为什么做这件事】
+ * 简历造假最常见、也最隐蔽的形态不是编数字，而是**悄悄升格职责**：
+ * 「参与」→「主导」、「协助」→「负责」、「了解」→「精通」。
+ * 数字编造容易被追问（"这 40% 怎么算的"），而职责升格往往能蒙混过关，
+ * 直到面试官让候选人讲"你是怎么主导的"才露馅——对用户是更致命的伤害。
+ *
+ * 同类项目在文档里写了这条纪律（"防止 contributed to 悄悄变成 built"），
+ * 但只作为给模型的提示词要求。本项目把它做成**确定性代码检查**：
+ * 逐级比对原文与改写用的职责动词，升格即报告。
+ *
+ * 分级依据：对工作成果的**所有权强度**，而非修辞强弱。
+ */
+const RESPONSIBILITY_LEVELS = [
+  { level: 1, label: '认知层', words: ['了解', '熟悉', '接触', '学习', '入门'] },
+  { level: 2, label: '辅助层', words: ['参与', '协助', '配合', '支持', '跟随'] },
+  { level: 3, label: '负责层', words: ['负责', '承担', '完成', '执行', '独立开发'] },
+  { level: 4, label: '主导层', words: ['主导', '牵头', '独立完成', '主持', '主责'] },
+  { level: 5, label: '决策层', words: ['统筹', '决策', '拍板', '制定战略', '定方向'] },
+]
+
+/**
+ * 提取文本中的职责强度证据。
+ *
+ * ⚠️ 关键设计（实测教训）：
+ * 早期实现取「全文最高层级」比对，会产生漏报——
+ * `协助完成接口对接` 同时含「协助」（辅助层）与「完成」（负责层），
+ * 全文最高层被抬到 3；而 `负责接口对接` 也是 3，于是"协助→负责"
+ * 的升格被判为无变化。
+ *
+ * 正确做法：**取全文最低层级作为基准**。
+ * 因为简历描述一件事时，最低强度的动词才代表真实参与程度
+ * （"协助完成"的真实含义是"协助"，"完成"只是补语）。
+ * 改写若把最低层抬高了，就是职责升格。
+ *
+ * @param {string} text 待分析文本
+ * @returns {{ minLevel: number, maxLevel: number, hits: Array<{ level: number, label: string, word: string }> }}
+ *   最弱/最强层级与全部命中词
+ */
+export function extractResponsibilityLevel(text) {
+  const src = normalizeText(text)
+  /** @type {Array<{ level: number, label: string, word: string }>} */
+  const hits = []
+  if (src === '') return { minLevel: 0, maxLevel: 0, hits }
+  for (const tier of RESPONSIBILITY_LEVELS) {
+    for (const word of tier.words) {
+      if (src.includes(word)) {
+        hits.push({ level: tier.level, label: tier.label, word })
+      }
+    }
+  }
+  if (hits.length === 0) return { minLevel: 0, maxLevel: 0, hits }
+  const levels = hits.map((h) => h.level)
+  return {
+    minLevel: Math.min(...levels),
+    maxLevel: Math.max(...levels),
+    hits,
+  }
+}
 
 /**
  * 归一化文本：统一换行，便于逐行处理。
@@ -309,6 +418,10 @@ export function normalizeText(input) {
  * 归一化规则：全角转半角、去掉千分位逗号、去掉尾部小数点。
  * 例：'1,200.' → '1200'；'４０%' → '40'
  *
+ * ⚠️ 调用方注意：本函数会**把日期也当成数字**（`2019.06`）。
+ * 日期有专门的检查项（{@link extractDateTokens}），因此
+ * `verifyRewrite` 在比对数字时会先剔除日期 token，避免同一问题被报两次。
+ *
  * 为什么以"数字"为主要抓手：简历里最危险的编造是量化数据
  * （"提升 40%"、"服务 12 万用户"），而数字的出现位置精确、可比对。
  *
@@ -324,6 +437,34 @@ export function extractNumericTokens(text) {
   for (const m of normalized.matchAll(/\d[\d,.]*/g)) {
     const token = m[0].replace(/,/g, '').replace(/\.$/, '')
     if (token !== '') out.add(token)
+  }
+  return out
+}
+
+/**
+ * 从数字 token 集合中剔除日期成分。
+ *
+ * 存在理由（实测）：`2019年6月` 改写成 `2019.06` 时，
+ * 数字检查会把 `2019.06` 当成"新出现的数字"而误报。
+ * 日期本该由专门的日期检查负责，数字检查必须让路。
+ *
+ * 剔除规则：
+ *   - 形如 `YYYY.MM` / `YYYY.MM.DD` 的复合 token
+ *   - 与任一日期 token 的年份部分相同的纯年份 token（如 `2019`）
+ *
+ * @param {Set<string>} numbers 数字 token 集合
+ * @param {Set<string>} dates 日期 token 集合（形如 `YYYY-MM` 或 `YYYY`）
+ * @returns {Set<string>} 剔除日期后的数字集合
+ */
+export function subtractDateTokens(numbers, dates) {
+  const out = new Set()
+  const dateYears = new Set([...dates].map((d) => d.slice(0, 4)))
+  for (const n of numbers) {
+    // 复合日期 token（2019.06 / 2019.06.01）
+    if (/^(19|20)\d{2}\.\d{1,2}(\.\d{1,2})?$/.test(n)) continue
+    // 与已知日期同年的裸年份
+    if (/^(19|20)\d{2}$/.test(n) && dateYears.has(n)) continue
+    out.add(n)
   }
   return out
 }
@@ -412,8 +553,16 @@ export function verifyRewrite({ original, rewritten } = {}) {
   ])
 
   // ── 1. 编造数字（最危险）─────────────────────────────────────────
-  const fabricatedNumbers = [...rewrittenNumbers]
-    .filter((n) => !originalNumbers.has(n))
+  //
+  // 先剔除日期成分：年份与日期有专门检查（第 4 项），
+  // 若在此重复报出，同一问题会出现两条，稀释报告可用性。
+  const originalDates = extractDateTokens(originalText)
+  const rewrittenDates = extractDateTokens(rewrittenText)
+  const originalNumbersOnly = subtractDateTokens(originalNumbers, originalDates)
+  const rewrittenNumbersOnly = subtractDateTokens(rewrittenNumbers, rewrittenDates)
+
+  const fabricatedNumbers = [...rewrittenNumbersOnly]
+    .filter((n) => !originalNumbersOnly.has(n))
     .sort()
   if (fabricatedNumbers.length > 0) {
     findings.push({
@@ -459,7 +608,65 @@ export function verifyRewrite({ original, rewritten } = {}) {
     })
   }
 
-  // ── 3. 真实数据丢失（非编造，但会削弱简历）─────────────────────
+  // ── 3. 职责升格（比编数字更隐蔽的造假）─────────────────────────
+  //
+  // 逐条比对职责动词强度。改写若把「参与」升格为「主导」，
+  // 属于事实性夸大——面试官追问"你怎么主导的"时会立刻暴露。
+  //
+  // 用 minLevel 而非 maxLevel 判定（理由见 extractResponsibilityLevel 说明）：
+  // 最低强度动词才代表真实参与程度。
+  const originalResp = extractResponsibilityLevel(originalText)
+  const rewrittenResp = extractResponsibilityLevel(rewrittenText)
+  if (
+    rewrittenResp.minLevel > 0 &&
+    originalResp.minLevel > 0 &&
+    rewrittenResp.minLevel > originalResp.minLevel
+  ) {
+    const from = RESPONSIBILITY_LEVELS.find((t) => t.level === originalResp.minLevel)
+    const to = RESPONSIBILITY_LEVELS.find((t) => t.level === rewrittenResp.minLevel)
+    const originalWeakest = originalResp.hits
+      .filter((h) => h.level === originalResp.minLevel)
+      .map((h) => h.word)
+    const rewrittenWeakest = rewrittenResp.hits
+      .filter((h) => h.level === rewrittenResp.minLevel)
+      .map((h) => h.word)
+    findings.push({
+      code: 'RESPONSIBILITY_INFLATED',
+      severity: 'error',
+      message:
+        `职责描述被升格：原文最弱的表述是「${from?.label ?? '未知'}」` +
+        `（${originalWeakest.join('、')}），改写后变为「${to?.label ?? '未知'}」` +
+        `（${rewrittenWeakest.join('、')}）。` +
+        '职责强度必须与原文一致，不得把"协助"写成"负责"或把"参与"写成"主导"。',
+      evidence: rewrittenWeakest,
+    })
+  }
+
+  // ── 4. 时间线一致性（日期被改动即事实错误）─────────────────────
+  //
+  // 起止日期属于"绝不可改写"的事实字段。改写若动了年份/月份，
+  // 会导致与背调信息不符。
+  if (originalDates.size > 0) {
+    const originalYears = new Set([...originalDates].map((d) => d.slice(0, 4)))
+    const changedDates = [...rewrittenDates].filter((d) => {
+      if (originalDates.has(d)) return false
+      // 原文只写了年份、改写补了同一年月份 → 不算改动
+      const year = d.slice(0, 4)
+      return !originalYears.has(year)
+    })
+    if (changedDates.length > 0) {
+      findings.push({
+        code: 'FABRICATED_DATE',
+        severity: 'error',
+        message:
+          `改写后出现原文没有的时间点：${changedDates.join('、')}。` +
+          '起止日期属于事实字段，不得改动。',
+        evidence: changedDates,
+      })
+    }
+  }
+
+  // ── 5. 真实数据丢失（非编造，但会削弱简历）─────────────────────
   const lostNumbers = [...originalNumbers]
     .filter((n) => !rewrittenNumbers.has(n))
     .sort()

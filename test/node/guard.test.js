@@ -185,6 +185,93 @@ describe('守卫：契约与元信息', () => {
   })
 })
 
+describe('守卫：职责升格检测（比编数字更隐蔽的造假）', () => {
+  test('参与 → 主导：必须判为升格', () => {
+    const report = verifyRewrite({
+      original: '参与了登录模块开发。',
+      rewritten: '主导登录模块开发。',
+    })
+    assert.equal(report.ok, false, '把"参与"写成"主导"是事实性夸大')
+    const finding = report.findings.find((f) => f.code === 'RESPONSIBILITY_INFLATED')
+    assert.ok(finding, '必须产出 RESPONSIBILITY_INFLATED')
+    assert.equal(finding.severity, 'error')
+  })
+
+  test('协助 → 负责：必须判为升格（含补语干扰项）', () => {
+    // 关键回归用例：`协助完成` 同时含「协助」(2) 与「完成」(3)，
+    // 若按"全文最高层"判定会漏报，必须按"最低层"判定。
+    const report = verifyRewrite({
+      original: '协助完成接口对接。',
+      rewritten: '负责接口对接。',
+    })
+    assert.equal(report.ok, false, '「协助完成」的真实强度是"协助"，不得被"完成"抬高层级')
+  })
+
+  test('同一强度的措辞强化：不得误报', () => {
+    const report = verifyRewrite({
+      original: '负责前端开发。',
+      rewritten: '负责并持续推进前端开发工作。',
+    })
+    assert.equal(report.ok, true, '同层动词的修辞强化不得误报')
+  })
+
+  test('压缩表述但保持最弱动词：不得误报', () => {
+    const report = verifyRewrite({
+      original: '参与需求评审，协助完成接口联调。',
+      rewritten: '参与需求评审并协助接口联调工作。',
+    })
+    assert.equal(report.ok, true, '最弱动词仍是"参与/协助"，属同层压缩')
+  })
+
+  test('原文无职责动词时不做判定（避免误报）', () => {
+    const report = verifyRewrite({
+      original: '完成登录页面。',
+      rewritten: '完成登录页面开发工作。',
+    })
+    assert.equal(report.ok, true, '原文强度为 0 时不判定升格')
+  })
+})
+
+describe('守卫：时间线一致性（日期属事实字段）', () => {
+  test('年份被改动：必须判为错误', () => {
+    const report = verifyRewrite({
+      original: '2019.06 - 2021.08 在某公司实习。',
+      rewritten: '2020.06 - 2021.08 在某公司实习。',
+    })
+    assert.equal(report.ok, false, '起止日期被改动必须报错')
+    assert.ok(report.findings.some((f) => f.code === 'FABRICATED_DATE'))
+  })
+
+  test('日期格式变化（年月 → 点号）：不得误报', () => {
+    const report = verifyRewrite({
+      original: '2019年6月入职。',
+      rewritten: '2019.06 入职。',
+    })
+    assert.equal(report.ok, true, '同一时间点的不同写法不得误报')
+  })
+
+  test('原文只有年份、改写补月份：不得误报', () => {
+    const report = verifyRewrite({
+      original: '2019 年入职。',
+      rewritten: '2019.06 入职。',
+    })
+    assert.equal(report.ok, true, '同一年内补充月份不构成事实改动')
+  })
+
+  test('日期不得被数字检查重复报告', () => {
+    const report = verifyRewrite({
+      original: '2019.06 入职。',
+      rewritten: '2020.06 入职。',
+    })
+    const codes = report.findings.map((f) => f.code)
+    assert.ok(codes.includes('FABRICATED_DATE'), '日期问题应由日期检查报告')
+    assert.ok(
+      !codes.includes('FABRICATED_NUMBER'),
+      '日期不应同时被数字检查报告（重复报告会稀释报告可用性）',
+    )
+  })
+})
+
 describe('守卫：防误报（误报会让守卫被忽略，比漏报更糟）', () => {
   test('动词 + 机构后缀 不得被当成机构名', () => {
     const report = verifyRewrite({

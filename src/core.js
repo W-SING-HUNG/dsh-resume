@@ -13,9 +13,10 @@ export const VERIFY_TOOL_NAME = 'verify_rewrite'
 
 /** 交付说明：提示词片段与测试共用一处，避免文案漂移。 */
 export const DELIVERY_NOTE =
-  '请严格按 instruction 中的系统规则处理 jd 与 resume，输出三部分：' +
-  '「优化后简历」/「改动说明」/「待补充清单」。' +
-  '铁律：只基于简历真实内容重排强化，禁止编造经历、数据、技能。'
+  '请严格按 instruction 中的系统规则处理 jd 与 resume，输出四部分：' +
+  '「优化后简历」/「改动说明」/「待补充清单」/「校验结果」。' +
+  '铁律：只基于简历真实内容重排强化，禁止编造经历、数据、技能；' +
+  '改写后必须调用 verify_rewrite 校验，未通过须修正后重新校验。'
 
 /**
  * canonical 输出契约（**裸 JSON Schema**）。
@@ -224,9 +225,10 @@ export function buildVerifyValue({ original, rewritten } = {}) {
   let summary
   if (errorCount > 0) {
     summary =
-      `校验未通过：发现 ${errorCount} 处疑似编造内容。` +
-      '你必须修正这些问题后重新提交 —— 删除或改写涉及编造数字/机构的表述，' +
-      '不得保留任何原文没有的量化数据或机构名。修正后请再次调用本工具确认通过。'
+      `校验未通过：发现 ${errorCount} 处疑似编造或夸大内容。` +
+      '你必须修正这些问题后重新提交 —— 删除改写的编造数字/机构，' +
+      '把升格的职责动词改回原强度，恢复被改动的日期。' +
+      '修正后请再次调用本工具确认通过。'
   } else if (warnCount > 0) {
     summary =
       `校验通过（无编造），但有 ${warnCount} 处提醒：原文的部分真实数据在改写后消失。` +
@@ -255,7 +257,9 @@ export function createVerifyToolDefinition() {
     name: VERIFY_TOOL_NAME,
     description:
       '反虚构校验（确定性代码执行，非模型判断）。传入简历原文与改写后内容，' +
-      '逐项比对改写是否引入了原文不存在的数字或机构名，并报告原文数据的丢失情况。' +
+      '逐项比对改写是否引入了原文不存在的内容：数字、机构/专名、' +
+      '职责强度升格（把「参与」写成「主导」）、时间点改动，' +
+      '并报告原文数据的丢失情况。' +
       '改写简历后必须调用本工具；返回 ok=false 时必须先修正再交付。',
     parameters: VERIFY_PARAMETERS_JSON_SCHEMA,
     output: {

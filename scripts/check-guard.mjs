@@ -47,9 +47,30 @@ const CASES = [
     expectOk: false,
   },
   {
-    name: '合法改写：纯措辞强化',
+    // 职责升格：比编数字更隐蔽，面试追问时才暴露
+    name: '职责升格：参与 → 主导',
+    original: '参与了登录模块开发。',
+    rewritten: '主导登录模块开发。',
+    expectOk: false,
+  },
+  {
+    // 关键回归：`协助完成` 含「协助」(辅助) 与「完成」(负责) 两个动词，
+    // 若按"全文最高层"判定会漏报，必须按"最低层"判定
+    name: '职责升格：协助 → 负责（含补语干扰）',
+    original: '协助完成接口对接。',
+    rewritten: '负责接口对接。',
+    expectOk: false,
+  },
+  {
+    name: '日期被改动：年份',
+    original: '2019.06 - 2021.08 在某公司实习。',
+    rewritten: '2020.06 - 2021.08 在某公司实习。',
+    expectOk: false,
+  },
+  {
+    name: '合法改写：纯措辞强化（保持同层职责动词）',
     original: '负责前端开发，优化页面加载速度。',
-    rewritten: '主导前端性能优化，通过重构关键渲染路径显著提升加载速度。',
+    rewritten: '负责前端开发，通过重构关键渲染路径显著提升页面加载速度。',
     expectOk: true,
   },
   {
@@ -65,6 +86,12 @@ const CASES = [
     expectOk: true,
   },
   {
+    name: '合法改写：日期格式变化但时间点不变',
+    original: '2019年6月入职。',
+    rewritten: '2019.06 入职。',
+    expectOk: true,
+  },
+  {
     // 回归用例：中文无词边界，「主导公司」曾是误报
     name: '不得误报：动词 + 机构后缀',
     original: '负责公司官网前端开发，使用了 Vue2。',
@@ -75,6 +102,12 @@ const CASES = [
     name: '不得误报：同一机构名修饰语变化',
     original: '在清华大学参与课题研究。',
     rewritten: '在清华大学深度参与课题研究并产出成果。',
+    expectOk: true,
+  },
+  {
+    name: '不得误报：同层职责动词的修辞强化',
+    original: '负责前端开发。',
+    rewritten: '负责并持续推进前端开发工作。',
     expectOk: true,
   },
 ]

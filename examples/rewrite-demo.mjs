@@ -48,7 +48,7 @@ console.log('返回值字段:', Object.keys(value).join(', '))
 console.log('language  :', value.language)
 console.log('instruction 长度:', value.instruction.length, '字符')
 
-rule('3. 三段式交付说明')
+rule('3. 四段式交付说明')
 console.log(value.note)
 
 rule('4. 铁律自查（instruction 中必须存在的约束）')
@@ -97,9 +97,19 @@ const guardCases = [
     rewritten: '在字节跳动公司实习，负责接口开发。',
   },
   {
-    label: '合法改写（只强化措辞、保留真实数据）',
+    label: '职责升格（把"参与"写成"主导"）',
+    original: '参与了登录模块开发。',
+    rewritten: '主导登录模块开发。',
+  },
+  {
+    label: '日期被改动（起止时间属事实字段）',
+    original: '2019.06 入职，负责接口开发。',
+    rewritten: '2020.06 入职，负责接口开发。',
+  },
+  {
+    label: '合法改写（只强化措辞、保留事实）',
     original: '负责前端开发，服务 80000 名用户。',
-    rewritten: '面向 80000 名用户主导前端开发，显著改善体验。',
+    rewritten: '面向 80000 名用户负责前端开发，显著改善使用体验。',
   },
 ]
 
