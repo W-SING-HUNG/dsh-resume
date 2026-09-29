@@ -30,7 +30,7 @@ npm install          # 仅装 devDependencies（运行时零依赖）
 ## 常用命令
 
 ```bash
-npm test                 # 测试（98 项）
+npm test                 # 测试（数量见 `npm test` 实际输出）
 npm run test:coverage    # 测试 + 覆盖率
 npm run lint             # 语法检查
 npm run typecheck        # JSDoc + checkJs 严格类型检查

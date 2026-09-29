@@ -2,7 +2,7 @@
 //
 // 设计原则：只基于事实重排和强化，绝不虚构经历（虚构 = 求职者面试翻车 = 差评）
 //
-// ┌─ PROMPT 版本：1.1.0 ────────────────────────────────────────────────────┐
+// ┌─ PROMPT 版本：1.2.0 ────────────────────────────────────────────────────┐
 // │ 改动本文件时必须同步更新此版本号，并在 CHANGELOG.md 说明理由。          │
 // │ 三项铁律（只用真实信息 / 保留量化数据 / 缺项进待补充清单）不可削弱，    │
 // │ 已由测试与 CI 的 guard 任务物理锁定。                                   │
@@ -10,10 +10,15 @@
 // │ v1.1.0：新增「改写后必须调用 verify_rewrite 校验」的强制闭环。          │
 // │ 原因：铁律此前只是提示词约束，模型可违反且无从发现；                    │
 // │ 现由确定性代码做二次校验，形成"改写 → 校验 → 修正 → 再校验"的闭环。     │
+// │                                                                        │
+// │ v1.2.0：导出环节纳入强制校验，要求导出时必须传 original。               │
+// │ 原因：校验此前只在 verify_rewrite，模型若跳过它直接导出，               │
+// │ 用户仍会拿到未校验的编造简历——铁律又回到"靠自觉"。                      │
+// │ 现在 export_resume 也会跑一次确定性校验，不通过则拒绝写出文件。         │
 // └────────────────────────────────────────────────────────────────────────┘
 
 /** 当前 prompt 版本。任何措辞改动都应递增，便于回溯输出质量变化。 */
-export const PROMPT_VERSION = '1.1.0'
+export const PROMPT_VERSION = '1.2.0'
 
 /** 支持的语言，与工具参数 schema 的 enum 保持一致。 */
 export const SUPPORTED_LANGUAGES = /** @type {const} */ (['zh', 'en'])
@@ -59,6 +64,10 @@ export function RESUME_SYSTEM_PROMPT(language = "zh") {
 4. 「校验结果」— 附上 verify_rewrite 的最终结论（是否通过、版本号、有无提醒）
 
 完成后，若用户需要文件，调用 export_resume 导出为 .docx 以便直接投递。
+调用 export_resume 时**必须同时传入 original（简历原文，改写前的那一份）**：
+导出前代码会再跑一次确定性校验，未通过则拒绝写出文件（交付前的最后一道关）。
+若被拒是因为你补了原文没有的事实信息（如联系方式），不要反复重试；
+请让用户提供真实内容并并入原文后再导出。
 
 ${language === "en" ? "全部输出使用英文。" : "全部输出使用简体中文。"}`;
 
@@ -96,7 +105,13 @@ The hard rules cannot rest on good intentions. After rewriting, you MUST call ve
 3. "To Add" — real information the candidate should supply (only if gaps exist)
 4. "Verification" — the final verify_rewrite result (pass/fail, version, warnings)
 
-When the user needs a file, call export_resume to produce a .docx ready to submit.`;
+When the user needs a file, call export_resume to produce a .docx ready to submit.
+You MUST also pass original (the resume as it was BEFORE rewriting — never the
+rewritten text, that would degrade the check into a self-comparison and be rejected):
+the export runs the same deterministic check again and refuses to write the file
+when it fails. If it fails because you added facts absent from the original
+(e.g. contact details), do not retry the same call — ask the user for the real
+values and merge them into the original first.`;
 
   return language === "en" ? en : zh;
 };

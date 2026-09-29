@@ -3,7 +3,7 @@
 // 分层理由：本文件不 import 任何平台包，因此**在任何机器上都能直接测试**，
 // 且可被零依赖的 src/index.js 安全复用（避免模块双实例问题）。
 import { RESUME_SYSTEM_PROMPT } from './prompt.js'
-import { GUARD_VERSION, verifyRewrite } from './guard.js'
+import { GUARD_VERSION, normalizeText, verifyRewrite } from './guard.js'
 import { assembleDeliverable, buildDocx, buildText } from './export.js'
 
 /** 模型可见的工具名。 */
@@ -377,6 +377,13 @@ export const EXPORT_PARAMETERS_JSON_SCHEMA = {
       type: 'string',
       description: '输出文件的绝对路径，扩展名决定格式（.docx / .md / .txt）',
     },
+    original: {
+      type: 'string',
+      description:
+        '简历原文（改写前的那一份）。**必填**：导出前由代码强制执行一次反虚构校验，' +
+        '校验不通过则拒绝写出文件。注意它必须是改写前的原文，' +
+        '不能把改写结果回填进来（两者相同时校验会退化为自反比对，将被拒绝）。',
+    },
     changes: { type: 'string', description: '可选：改动说明，写入导出文件的附页' },
     gaps: { type: 'string', description: '可选：待补充清单，写入导出文件的附页' },
     verification: { type: 'string', description: '可选：校验结果，写入导出文件的附页' },
@@ -384,10 +391,11 @@ export const EXPORT_PARAMETERS_JSON_SCHEMA = {
       type: 'boolean',
       description:
         '是否把改动说明/待补充/校验结果一并写入（默认 false）。' +
-        '投递给 HR 时应为 false，只留简历本体；留档时可设为 true。',
+        '投递给 HR 时应为 false，只留简历本体；留档时可设为 true。' +
+        '注意：附录属元信息，不参与反虚构校验。',
     },
   },
-  required: ['resume', 'outputPath'],
+  required: ['resume', 'outputPath', 'original'],
 }
 
 /** 导出工具的 canonical 输出契约。 */
@@ -399,18 +407,29 @@ export const EXPORT_VALUE_SCHEMA = {
     path: { type: 'string', description: '实际写入的文件路径' },
     format: { type: 'string', enum: ['docx', 'md', 'txt'], description: '导出格式' },
     bytes: { type: 'number', description: '文件字节数' },
+    verified: {
+      type: 'boolean',
+      description:
+        '本次导出是否经过反虚构校验。true = 已由代码校验通过；' +
+        'false = 调用方未提供原文，无法校验（投递前请补做校验）。',
+    },
     summary: { type: 'string', description: '面向模型的结论摘要' },
   },
-  required: ['ok', 'path', 'format', 'bytes', 'summary'],
+  required: ['ok', 'path', 'format', 'bytes', 'verified', 'summary'],
 }
 
 /**
  * 根据扩展名判定导出格式。
+ *
+ * 注意：必须先 trim 再判定。`exportResume` 写盘前会对路径做 trim，
+ * 若这里不 trim，`" a.docx "` 会被判为"不支持的格式"而报错，
+ * 与"同一条路径稍后却能正常写入"自相矛盾（判定与写入基准必须一致）。
+ *
  * @param {string} filePath 输出路径
  * @returns {'docx' | 'md' | 'txt' | null} 格式；不支持的扩展名返回 null
  */
 export function detectExportFormat(filePath) {
-  const lower = String(filePath ?? '').toLowerCase()
+  const lower = String(filePath ?? '').trim().toLowerCase()
   if (lower.endsWith('.docx')) return 'docx'
   if (lower.endsWith('.md')) return 'md'
   if (lower.endsWith('.txt')) return 'txt'
@@ -480,9 +499,19 @@ export function buildExportPayload({
  *   1. 契约层保持可离线测试（测试注入假写入函数）
  *   2. 装配层（index.js）负责真正的 IO，职责分明
  *
+ * 【交付关：反虚构校验由代码强制执行】
+ * 此前校验只发生在 verify_rewrite，模型若跳过它直接调 export_resume，
+ * 用户就会拿到未经校验、可能含编造内容的简历——等于把铁律交回给"模型自觉"，
+ * 正是本项目存在理由所要消除的东西。现在只要调用方提供了原文，
+ * 导出前一律先跑确定性校验；不通过则**拒绝写出文件**，并指明问题。
+ *
+ * 未提供原文时无法校验（没有比对基准），此时允许导出以便用户留档，
+ * 但返回值 `verified: false` 并附明确提醒——不制造"已校验"的假象。
+ *
  * @param {{
  *   resume?: unknown,
  *   outputPath?: unknown,
+ *   original?: unknown,
  *   changes?: unknown,
  *   gaps?: unknown,
  *   verification?: unknown,
@@ -490,21 +519,81 @@ export function buildExportPayload({
  * }} args 导出参数
  * @param {(path: string, data: Buffer) => Promise<void>} writeFile 写入实现
  * @returns {Promise<object>} 严格匹配 EXPORT_VALUE_SCHEMA 的返回值
+ * @throws {Error} 提供了原文且校验不通过时抛错（不写出任何文件）
  */
 export async function exportResume(args, writeFile) {
   const payload = buildExportPayload(args)
   const path = String(/** @type {{ outputPath: string }} */ (args).outputPath).trim()
+  const a = /** @type {{ original?: unknown, resume?: unknown, includeAppendix?: unknown }} */ (args)
+
+  // ── 交付关 ──────────────────────────────────────────────────────
+  //
+  // 【为什么必须防"自证清白"】
+  // `original` 是模型自己传的参数，不是可信源。若模型把编造内容同时写进
+  // original 与 resume，verifyRewrite 就退化成自反比对——原文等于"改写"，
+  // 任何编造都"有据可依"，而返回值还会宣称"校验已通过"。
+  // 那比不做这道关更糟：它把"没有校验"伪装成"校验通过"。
+  // 因此原文与结果实质相同时，一律拒绝并说明原因，不得置 verified=true。
+  const original = a.original
+  const resumeText = typeof a.resume === 'string' ? a.resume : ''
+  const hasOriginal = typeof original === 'string' && original.trim() !== ''
+  let verified = false
+
+  if (hasOriginal) {
+    // 比对前统一去首尾空白：normalizeText 只归一化换行，不裁空白，
+    // 若不补这一步，`" 原文 "` 与 `"原文"` 会被判为不同而绕过自证清白检查。
+    if (normalizeText(original).trim() === normalizeText(resumeText).trim()) {
+      throw new Error(
+        '导出已中止：original 与 resume 实质相同，无法构成有效校验。\n' +
+          '反虚构校验需要"改写前的原文"作为比对基准；两者相同时校验会退化为自反比对，' +
+          '任何编造都查不出来。\n' +
+          '请传入真实的简历原文（改写前的那一份），而不是把改写结果回填进去。',
+      )
+    }
+
+    const report = verifyRewrite({ original, rewritten: resumeText })
+    if (!report.ok) {
+      const errors = report.findings.filter((f) => f.severity === 'error')
+      throw new Error(
+        `导出已中止：反虚构校验未通过（${errors.length} 项）。\n` +
+          errors.map((f) => `- ${f.message}`).join('\n') +
+          // 给出出路，否则用户会陷入"改好了却导不出"的死锁。
+          // 最常见的情形是补全联系方式：电话/邮箱是事实信息，
+          // 模型无从知道用户真实号码，只能由用户提供。
+          '\n处理方式：\n' +
+          '1) 若是编造内容 → 删除，或改回原文的表述；\n' +
+          '2) 若是你补充的真实信息（如联系方式、真实时间）→ ' +
+          '把它同时写进简历原文（original），让校验有据可依，然后重新导出。\n' +
+          '编造的经历会在面试中被问穿，因此这道关不能跳过。',
+      )
+    }
+    verified = true
+  }
+
   await writeFile(path, payload.data)
+
+  // 附录（改动说明/待补充清单/校验结果）是**元信息**，不参与反虚构校验——
+  // 待补充清单列出 JD 要求但简历缺失的技能（如 Vue3、TypeScript）本就是设计意图，
+  // 拿去校验必然误报。但也不能因此让用户以为整份文件都被校验过，故明确声明范围。
+  const withAppendix = a.includeAppendix === true
   return {
     ok: true,
     path,
     format: payload.format,
     bytes: payload.data.length,
+    verified,
     summary:
       `已导出 ${payload.format.toUpperCase()} 文件（${payload.data.length} 字节）到 ${path}。` +
       (payload.format === 'docx'
         ? '该文件可直接用于投递；版式为单栏 A4，ATS 可正常解析。'
-        : ''),
+        : '') +
+      (verified
+        ? `反虚构校验已通过（guard ${GUARD_VERSION}）` +
+          (withAppendix
+            ? '；**校验范围仅限简历本体**，附录（改动说明/待补充/校验结果）属元信息，不参与校验。'
+            : '。')
+        : '注意：本次未提供简历原文，因此**未做反虚构校验**——' +
+          '投递前请用 verify_rewrite 补做一次，确认没有编造的数字/机构/职责升格。'),
   }
 }
 
@@ -519,7 +608,9 @@ export function createExportToolDefinition(writeFile) {
     description:
       '把优化后的简历导出为可投递文件。支持 .docx（推荐，可直接投递）、.md、.txt。' +
       '默认只输出简历本体；设 includeAppendix=true 会把改动说明/待补充清单/校验结果一并附加' +
-      '（适合自己留档，不适合发给 HR）。不会覆盖已存在的文件。',
+      '（适合自己留档，不适合发给 HR）。不会覆盖已存在的文件。' +
+      '**必须传 original（简历原文）**：导出前会由代码强制执行一次反虚构校验，' +
+      '校验不通过将拒绝写出文件，从机制上杜绝"编造的简历被投递出去"。',
     parameters: EXPORT_PARAMETERS_JSON_SCHEMA,
     output: {
       schema: EXPORT_VALUE_SCHEMA,

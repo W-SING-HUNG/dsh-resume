@@ -132,16 +132,83 @@ export function buildZip(entries) {
  * 简历段落。
  * @typedef {object} ResumeBlock
  * @property {'h1' | 'h2' | 'h3' | 'bullet' | 'text'} type 段落类型
- * @property {string} text 段落文本
+ * @property {string} text 段落文本（已剥离 Markdown 行内标记）
+ * @property {number} level 嵌套层级：正文/标题为 0，顶级要点为 1，逐级递增
  */
+
+/** 制表位宽度（twip）。嵌套要点按此步进缩进。 */
+const INDENT_STEP = 360
+
+/**
+ * 剥离行内 Markdown 标记，保留纯文本。
+ *
+ * 【存在理由（实证缺陷，2026-09-28）】
+ * 此前 `**加粗**` 会被原样当作文本，导出成 Word 后 HR 看到的是
+ * `· **某电商平台** 前端开发`——字面星号。而加粗是 AI 改写简历时
+ * 最常用的强调写法，等于最常见的输出直接翻车。
+ *
+ * 【边界约束（第二层缺陷，同样由实证发现）】
+ * 朴素的 `_([^_]+)_` 会**静默吃掉技术术语里的下划线和乘号**：
+ *   `t_order_item` → `torderitem`、`2*3*4` → `234`
+ * 这比字面星号严重得多——它在篡改候选人的真实数据，
+ * 直接违反本项目「保留原始量化数据」的铁律。
+ * 因此强调标记一律要求**外侧边界**（行首/空白/标点，不能紧邻字母数字），
+ * 使 `user_id`、`t_order_item`、`2*3*4` 这类写法原样保留。
+ *
+ * @param {string} text 原始行内文本
+ * @returns {string} 去除标记后的文本
+ */
+function stripInlineMarkdown(text) {
+  // 强调标记的外侧边界：不能紧邻词字符（字母/数字/下划线），
+  // 否则 snake_case 与算式中的符号会被误当标记吃掉。
+  const OPEN = '(?<![\\w_])'
+  const CLOSE = '(?![\\w_])'
+  return String(text)
+    // 图片：保留替代文字（图片本身无法在基础版式里嵌入）
+    .replace(/!\[([^\]]*)\]\([^)]*\)/g, '$1')
+    // 链接：保留链接文字
+    .replace(/\[([^\]]+)\]\([^)]*\)/g, '$1')
+    // 行内代码：去掉反引号（反引号不会出现在正常词内，无边界风险）
+    .replace(/`([^`]+)`/g, '$1')
+    // 删除线
+    .replace(/~~([^~]+)~~/g, '$1')
+    // 粗斜体（三星）→ 粗体 → 斜体；顺序不可颠倒，否则 `***x***` 会被拆错
+    .replace(new RegExp(`${OPEN}\\*\\*\\*(?=\\S)([\\s\\S]*?\\S)\\*\\*\\*${CLOSE}`, 'g'), '$1')
+    .replace(new RegExp(`${OPEN}\\*\\*(?=\\S)([\\s\\S]*?\\S)\\*\\*${CLOSE}`, 'g'), '$1')
+    .replace(new RegExp(`${OPEN}\\*(?=\\S)([^*\\s][^*]*?)\\*${CLOSE}`, 'g'), '$1')
+    .trim()
+}
+
+// ── 为什么不处理下划线强调（`_斜体_` / `__粗体__`）────────────────────
+//
+// 【结论：整类移除，不是遗漏】
+// 下划线强调与技术标识符在结构上**完全无法区分**：
+//   `__bold__` 与 `__init__`、`_斜体_` 与 `表_订单明细_索引` 的正则形态一模一样。
+// 而两者的误判代价严重不对称：
+//   - 漏剥离 → HR 看到字面下划线，难看，但内容 100% 正确；
+//   - 误剥离 → `__init__.py` 变 `init.py`、`表_订单明细_索引` 变 `表订单明细索引`，
+//     属于**静默篡改候选人的真实技术描述**，违反「保留原始内容」铁律。
+//
+// 实测过的三次尝试（都失败，留作记录）：
+//   1. 朴素 `_([^_]+)_` → 吃掉 `t_order_item`、`2*3*4`
+//   2. 加词边界 `(?<![\w_])…(?![\w_])` → 仍吃掉 `__init__.py`、`__main__`
+//   3. 限定"内容含汉字才剥离" → 仍吃掉 `表_订单明细_索引`、`用户名_昵称_邮箱`
+//      （中文技术文档用下划线做分隔正是常见写法）
+//
+// 取舍依据：本项目原则是「宁可漏报不可误报」。中文简历的强调几乎都用星号，
+// `_斜体_` 属罕见写法；用"罕见写法能正确渲染"去换"常见技术术语被静默篡改"
+// 是不划算的交易。星号强调无此冲突（`**` 不可能出现在合法标识符中），全场景生效。
 
 /**
  * 将简历 Markdown 解析为结构化段落。
  *
  * 支持的语法（刻意保持精简——只处理简历里真实会出现的写法）：
  *   - `# 标题` / `## 小节` / `### 子小节`
- *   - `- 要点` / `* 要点`（项目符号）
+ *   - `- 要点` / `* 要点` / `+ 要点`（项目符号，支持缩进嵌套）
  *   - 普通段落
+ *
+ * 行内标记（`**粗体**`、`` `代码` ``、`[文字](链接)`）会被剥离为纯文本；
+ * 见 {@link stripInlineMarkdown} 的存在理由。
  *
  * @param {string} markdown 简历 Markdown 文本
  * @returns {ResumeBlock[]} 段落序列
@@ -151,25 +218,34 @@ export function parseResumeMarkdown(markdown) {
   const out = []
   const src = String(markdown ?? '').replace(/\r\n?/g, '\n')
   for (const rawLine of src.split('\n')) {
+    if (rawLine.trim() === '') continue
+
+    // 缩进在剥离前测量：Markdown 的层级信息只存在于缩进里。
+    // 制表符按一个缩进步长计（简历里 Tab 通常就是一级缩进）。
+    const indentWidth = (/^[\t ]*/.exec(rawLine)?.[0] ?? '').replace(/\t/g, '  ').length
     const line = rawLine.trim()
-    if (line === '') continue
 
     const heading = /^(#{1,3})\s+(.*)$/.exec(line)
     if (heading) {
       const level = heading[1].length
       /** @type {'h1' | 'h2' | 'h3'} */
       const type = level === 1 ? 'h1' : level === 2 ? 'h2' : 'h3'
-      out.push({ type, text: heading[2].trim() })
+      out.push({ type, text: stripInlineMarkdown(heading[2]), level: 0 })
       continue
     }
 
     const bullet = /^[-*+]\s+(.*)$/.exec(line)
     if (bullet) {
-      out.push({ type: 'bullet', text: bullet[1].trim() })
+      // 每 2 个空格算一层嵌套（Markdown 的常见约定），最少 1 层。
+      out.push({
+        type: 'bullet',
+        text: stripInlineMarkdown(bullet[1]),
+        level: 1 + Math.floor(indentWidth / 2),
+      })
       continue
     }
 
-    out.push({ type: 'text', text: line })
+    out.push({ type: 'text', text: stripInlineMarkdown(line), level: 0 })
   }
   return out
 }
@@ -186,11 +262,27 @@ const XML_ESCAPES = /** @type {const} */ ({
 })
 
 /**
- * @param {string} text 待转义文本
- * @returns {string} 转义后文本
+ * XML 1.0 允许的字符之外的控制字符。
+ *
+ * 【存在理由（实证缺陷，2026-09-28）】
+ * XML 1.0 规范禁止 NUL、BEL 等控制字符出现在文档中（连转义都不允许）。
+ * 此前这些字符会被原样写进 document.xml，Word 打开时报"文件已损坏"。
+ * 简历文本来自模型输出与用户粘贴，带上不可见控制字符是常见情况
+ * （尤其从网页/终端复制时）。制表、换行、回车是合法空白，予以保留。
+ */
+// eslint-disable-next-line no-control-regex
+const ILLEGAL_XML_CHARS = /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f\ufffe\uffff]/g
+
+/**
+ * 转义 XML 特殊字符，并剔除 XML 1.0 非法的控制字符。
+ *
+ * @param {string} text 待处理文本
+ * @returns {string} 可安全嵌入 XML 的文本
  */
 function escapeXml(text) {
-  return String(text).replace(/[&<>"']/g, (c) => XML_ESCAPES[/** @type {keyof typeof XML_ESCAPES} */ (c)])
+  return String(text)
+    .replace(ILLEGAL_XML_CHARS, '')
+    .replace(/[&<>"']/g, (c) => XML_ESCAPES[/** @type {keyof typeof XML_ESCAPES} */ (c)])
 }
 
 /** 字体与字号（半磅为单位：24 半磅 = 12pt）。 */
@@ -199,19 +291,30 @@ const STYLE = /** @type {const} */ ({
   h2: { size: 26, bold: true, spaceBefore: 240, spaceAfter: 80 },
   h3: { size: 24, bold: true, spaceBefore: 120, spaceAfter: 60 },
   text: { size: 21, spaceAfter: 60 },
-  bullet: { size: 21, spaceAfter: 40, indent: 360 },
+  bullet: { size: 21, spaceAfter: 40 },
 })
 
 /**
  * 生成一个 OOXML 段落。
+ *
+ * 【为什么 before/after 必须合并进同一个 w:spacing】
+ * OOXML 的 `w:pPr` 里各子元素有出现次数上限，`w:spacing` 是 maxOccurs=1。
+ * 早期实现对 before 与 after 各写一个 `<w:spacing>`，凡同时带两者的样式
+ * （h2/h3）都会产出重复元素——Word 会提示"文件需要修复"，
+ * 严格的 ATS 解析器可能直接判定文档非法。
+ *
  * @param {string} text 段落文本
  * @param {{ size: number, bold?: boolean, spaceBefore?: number, spaceAfter?: number, indent?: number }} [style] 样式
  * @returns {string} `<w:p>` 片段
  */
 function paragraph(text, style = STYLE.text) {
+  // before / after 合成单个元素；两者皆无时不生成 pPr。
+  const spacingAttrs = [
+    style.spaceBefore ? ` w:before="${style.spaceBefore}"` : '',
+    style.spaceAfter ? ` w:after="${style.spaceAfter}"` : '',
+  ].join('')
   const pPr = [
-    style.spaceBefore ? `<w:spacing w:before="${style.spaceBefore}"/>` : '',
-    style.spaceAfter ? `<w:spacing w:after="${style.spaceAfter}"/>` : '',
+    spacingAttrs ? `<w:spacing${spacingAttrs}/>` : '',
     style.indent ? `<w:ind w:left="${style.indent}"/>` : '',
   ].join('')
   const rPr = [
@@ -230,29 +333,79 @@ const CONTENT_TYPES = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
 <Default Extension="xml" ContentType="application/xml"/>
 <Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>
+<Override PartName="/docProps/core.xml" ContentType="application/vnd.openxmlformats-package.core-properties+xml"/>
+<Override PartName="/docProps/app.xml" ContentType="application/vnd.openxmlformats-officedocument.extended-properties+xml"/>
 </Types>`
 
 const ROOT_RELS = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
 <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/>
+<Relationship Id="rId2" Type="http://schemas.openxmlformats.org/package/2006/relationships/metadata/core-properties" Target="docProps/core.xml"/>
+<Relationship Id="rId3" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/extended-properties" Target="docProps/app.xml"/>
 </Relationships>`
+
+/**
+ * 文档核心属性。不写这部分 Word 也能打开，但文件属性会是空白，
+ * 且"最近使用的文档"列表里显示为无标题——投递级文件应当带有身份。
+ * @param {string} title 文档标题（通常取简历姓名）
+ * @returns {string} core.xml 全文
+ */
+function buildCoreProps(title) {
+  const safe = escapeXml(title)
+  return `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<cp:coreProperties xmlns:cp="http://schemas.openxmlformats.org/package/2006/metadata/core-properties" xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:dcterms="http://purl.org/dc/terms/" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
+<dc:title>${safe}</dc:title>
+<dc:creator>dsh-resume</dc:creator>
+<cp:lastModifiedBy>dsh-resume</cp:lastModifiedBy>
+</cp:coreProperties>`
+}
+
+/** 扩展属性（应用名）。Word 会读取，缺失时同样留空。 */
+const APP_PROPS = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Properties xmlns="http://schemas.openxmlformats.org/officeDocument/2006/extended-properties" xmlns:vt="http://schemas.openxmlformats.org/officeDocument/2006/docPropsVTypes">
+<Application>dsh-resume</Application>
+</Properties>`
+
+/**
+ * 解析文档标题：优先用调用方显式传入的 title，否则取简历里的首个标题，
+ * 再退化为"个人简历"。
+ *
+ * 为什么需要：投递级 .docx 在 HR 打开时，文件属性与"最近文档"应显示候选人身份，
+ * 而不是空白或"文档1"。此前 `options.title` 被 `void options` 丢弃，是死参数。
+ *
+ * @param {ResumeBlock[]} blocks 已解析的段落
+ * @param {{ title?: string }} [options] 调用方参数
+ * @returns {string} 文档标题
+ */
+function resolveDocTitle(blocks, options = {}) {
+  const explicit = typeof options.title === 'string' ? options.title.trim() : ''
+  if (explicit !== '') return explicit
+  const heading = blocks.find((b) => b.type === 'h1')
+  return heading !== undefined && heading.text !== '' ? heading.text : '个人简历'
+}
 
 /**
  * 生成 DOCX 文件字节。
  *
  * @param {string} markdown 简历 Markdown
- * @param {{ title?: string }} [options] 可选参数（title 暂用于文档属性占位）
+ * @param {{ title?: string }} [options] 可选参数；title 写入文档属性（缺省取首个一级标题）
  * @returns {Buffer} .docx 字节
  */
 export function buildDocx(markdown, options = {}) {
-  void options
   const blocks = parseResumeMarkdown(markdown)
   const body = blocks
     .map((b) => {
       if (b.type === 'h1') return paragraph(b.text, STYLE.h1)
       if (b.type === 'h2') return paragraph(b.text, STYLE.h2)
       if (b.type === 'h3') return paragraph(b.text, STYLE.h3)
-      if (b.type === 'bullet') return paragraph(`· ${b.text}`, STYLE.bullet)
+      if (b.type === 'bullet') {
+        // 嵌套层级按步长递进缩进，让"主项 + 子项"的层次在 Word 里保留下来。
+        // 此前所有要点都缩进 360，层级信息在导出时丢失，长简历会糊成一片。
+        const indent = INDENT_STEP * Math.max(1, b.level)
+        // 二级及更深的要点用空心圆点，与主项在视觉上区分。
+        const marker = b.level >= 2 ? '◦' : '·'
+        return paragraph(`${marker} ${b.text}`, { ...STYLE.bullet, indent })
+      }
       return paragraph(b.text, STYLE.text)
     })
     .join('')
@@ -270,6 +423,8 @@ export function buildDocx(markdown, options = {}) {
     { name: '[Content_Types].xml', content: CONTENT_TYPES },
     { name: '_rels/.rels', content: ROOT_RELS },
     { name: 'word/document.xml', content: document },
+    { name: 'docProps/core.xml', content: buildCoreProps(resolveDocTitle(blocks, options)) },
+    { name: 'docProps/app.xml', content: APP_PROPS },
   ])
 }
 

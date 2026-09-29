@@ -43,18 +43,20 @@ if (!report.ok) {
 console.log('\n=== 第 2 步：导出可投递文件 ===')
 const tool = createExportToolDefinition(writeResumeFile)
 
+// 必须传入 original：导出前由代码再执行一次反虚构校验（交付关）。
 const docxPath = join(OUT, '投递版简历.docx')
-const r1 = await tool.execute({ resume: REWRITTEN, outputPath: docxPath })
+const r1 = await tool.execute({ resume: REWRITTEN, original: ORIGINAL, outputPath: docxPath })
 console.log('DOCX:', r1.summary)
 
 const mdPath = join(OUT, '投递版简历.md')
-const r2 = await tool.execute({ resume: REWRITTEN, outputPath: mdPath })
-console.log('MD  :', r2.bytes, '字节')
+const r2 = await tool.execute({ resume: REWRITTEN, original: ORIGINAL, outputPath: mdPath })
+console.log('MD  :', r2.bytes, '字节 | verified =', r2.verified)
 
 console.log('\n=== 第 3 步：留档版（带附录）===')
 const archivePath = join(OUT, '留档版.md')
 const r3 = await tool.execute({
   resume: REWRITTEN,
+  original: ORIGINAL,
   outputPath: archivePath,
   changes: '1. 补全姓名与求职意向\n2. 措辞由"使用"改为"负责使用"，保持同层职责',
   gaps: 'Vue3 / TypeScript / Vite（JD 要求但简历缺失，未编造）',
@@ -63,9 +65,37 @@ const r3 = await tool.execute({
 })
 console.log('留档:', r3.bytes, '字节')
 
-console.log('\n=== 第 4 步：安全边界验证 ===')
+console.log('\n=== 第 4 步：交付关——编造的简历导不出来 ===')
+// 45% 是原文没有的数字。交付关必须在写出任何文件之前拦下它。
+const evilPath = join(OUT, '编造版简历.docx')
 try {
-  await tool.execute({ resume: REWRITTEN, outputPath: docxPath })
+  await tool.execute({
+    resume: REWRITTEN.replace('1.8s', '0.9s'),
+    original: ORIGINAL,
+    outputPath: evilPath,
+  })
+  console.log('!! 不应成功——编造的数字竟然被导出')
+} catch (err) {
+  console.log('✓ 编造被拒绝导出:', err.message.split('\n')[0])
+}
+console.log('  文件是否被写出:', existsSync(evilPath) ? '✘ 是（错误）' : '✔ 否')
+
+console.log('\n=== 第 4b 步：自证清白也导不出来 ===')
+// 把改写结果回填进 original，会让校验退化为自反比对——必须拒绝而非放行
+try {
+  await tool.execute({
+    resume: REWRITTEN.replace('1.8s', '0.9s'),
+    original: REWRITTEN.replace('1.8s', '0.9s'),
+    outputPath: join(OUT, '自证清白版.docx'),
+  })
+  console.log('!! 不应成功——自证清白竟然通过了校验')
+} catch (err) {
+  console.log('✓ 自证清白被拒绝:', err.message.split('\n')[0])
+}
+
+console.log('\n=== 第 5 步：安全边界验证 ===')
+try {
+  await tool.execute({ resume: REWRITTEN, original: ORIGINAL, outputPath: docxPath })
   console.log('!! 不应成功——已存在的文件被覆盖了')
 } catch (err) {
   console.log('✓ 重复导出被拒绝:', err.message.split('\n')[0].slice(0, 50))

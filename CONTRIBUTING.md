@@ -18,7 +18,7 @@
 git clone <repo-url>
 cd dsh-resume
 npm install          # 仅装 devDependencies（TypeScript，用于静态检查）
-npm run test:all     # 全量验证：86 项断言
+npm run test:all     # 全量验证（等价于 npm run verify）
 ```
 
 **不需要** DSH 运行时即可跑全部测试。`test/node/schema.test.js` 会自动探测本机 DSH 安装目录，
@@ -145,7 +145,7 @@ test: 补 resume 为空的边界用例
 
 ## 提交前检查清单
 
-- [ ] `npm run verify` 全绿（语法 + 类型 + 96 项测试 + 示例）
+- [ ] `npm run verify` 全绿（语法 + 类型 + 文档检查 + 发布审计 + 守卫行为 + 测试 + 示例）
 - [ ] 未引入任何 `import '@deepseek-ai/*'`
 - [ ] `package.json` 的 `dependencies` 仍为空
 - [ ] 新增 schema 已通过 `test/node/schema.test.js`（真机校验）
