@@ -89,7 +89,26 @@ describe('发布审计：规则来源与自检', () => {
     const src = readAuditScript()
     assert.match(src, /existsSync\(LOCAL_TERMS\)/, '读取私密规则前应检查文件存在')
     assert.match(src, /existsSync\(LOCAL_EXCLUDE\)/, '读取排除名单前应检查文件存在')
-    assert.match(src, /仅执行凭据检查/, '缺失时应打印降级提示')
+    // 干净 clone（CI）里本地规则不存在，脚本必须仍能跑完并说明"本地规则未加载"
+    assert.match(src, /规则文件不随 clone 分发/, '缺失时应说明本地规则未加载属正常')
+  })
+
+  test('分层设计：公开层必须独立于本地层生效', () => {
+    const src = readAuditScript()
+    // 公开层（凭据 / 内部引用）的规则常量随仓库走，clone 后仍有效。
+    // 若有人把这些规则也挪进本地文件，公开层将失去检查力——测试拦住这种改动。
+    assert.match(src, /const CREDENTIAL_RULES = \[/, '凭据规则应作为公开层常量定义在脚本内')
+    assert.match(
+      src,
+      /const DANGLING_INTERNAL_REF_RULES = \[/,
+      '内部引用规则应作为公开层常量定义在脚本内',
+    )
+    // 自检探针必须只依赖公开层规则（否则 clone 环境下自检会失效）
+    assert.match(
+      src,
+      /CREDENTIAL_RULES\.some/,
+      '自检应基于公开层规则，保证任何环境下都能验证检查逻辑有效',
+    )
   })
 
   test('内部路径匹配按目录边界，不用裸前缀', () => {

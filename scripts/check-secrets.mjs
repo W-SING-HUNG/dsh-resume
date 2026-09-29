@@ -1,23 +1,27 @@
 #!/usr/bin/env node
 // 推送前发布检查（pre-push publish audit）
 //
-// 扫描三类风险：
-//   A. 凭据类：密钥、令牌、私钥、硬编码口令（规则公开——这些是通用模式）
-//   B. 私密内容类：规则从 .git/info/private-terms.txt 读取（见下）
-//   C. 内部路径类：内部资料文件被纳入版本库，名单从 .git/info/exclude 读取
+// 分两层，各自独立可验证：
 //
-// ── 为什么规则来源分成两处 ────────────────────────────────────────────
-// 本脚本是**公开文件**，会被任何人读到。而"什么内容算私密"这个定义本身
-// 就是私密的：如果把具体的屏蔽词表写在这里，防护规则就变成了泄漏源——
-// 读代码的人直接看到这些词。因此 B/C 两类规则的名单放在 .git/info/ 下
-// （git 的本地目录，永不进入版本库、永不上传），本脚本运行时读取它。
-// 忽略行为与 .gitignore 完全等价（两者同为 git 的排除来源），
-// 但公开仓库里看不到任何名单。
+//   ┌─ 公开层（随仓库分发，任何人 clone 后都能跑出真实结果）───────────┐
+//   │  A. 凭据类：密钥、令牌、私钥、硬编码口令                        │
+//   │  B. 内部资料引用：公开文件里出现内部文档路径即为泄漏信号        │
+//   │  C. 自检探针：确认检查逻辑本身有效                              │
+//   └──────────────────────────────────────────────────────────────────┘
 //
-// 本地文件缺失时（如 CI 的干净克隆）自动降级：仍执行 A 类与通用检查，
-// 并给出提示。这是可接受的——干净克隆里本来就没有内部文件。
+//   ┌─ 本地层（规则文件在 .git/info/，永不入库，缺失时静默降级）───────┐
+//   │  D. 私密内容词：项目专属的屏蔽词（规则本身是敏感的）            │
+//   │  E. 内部路径拦截：内部资料文件被误提交进版本库                  │
+//   └──────────────────────────────────────────────────────────────────┘
 //
-// 跳过方式：不要跳过。若确有正当内容命中，调窄规则或加入 ALLOWLIST 并说明理由。
+// 为什么 E 层也在本地：内部文档的**文件名**本身就是不该公开的信息
+// （外人看到 `GOAL.md` 这些名字即知项目有内部决策与商业文档）。
+// 而在 clone 环境里内部文件根本不存在，因此 E 层天然不需要——
+// 它只在开发机上生效，正是它该在的地方。
+//
+// 为什么分层：本地层规则不能公开（规则内容即敏感信息），
+// 但公开层必须对任何 clone 者都有效——否则外人看到的是
+// "扫描 31 个文件、检查 0 条规则"，那会让人以为审计形同虚设。
 //
 // 运行：npm run check:secrets
 
@@ -29,16 +33,15 @@ import { fileURLToPath } from 'node:url'
 const ROOT = resolve(fileURLToPath(new URL('..', import.meta.url)))
 const TEXT_EXT = /\.(js|mjs|cjs|json|md|yml|yaml|txt|html|ps1|sh|env|toml|ini)$/
 
-/** 本地（不入库）文件的路径。 */
-const LOCAL_EXCLUDE = join(ROOT, '.git', 'info', 'exclude')
+/** 本地（不入库）规则文件路径。 */
 const LOCAL_TERMS = join(ROOT, '.git', 'info', 'private-terms.txt')
+const LOCAL_EXCLUDE = join(ROOT, '.git', 'info', 'exclude')
 
 /**
- * 只扫描**将被推送的文件**（git 跟踪的），不扫磁盘上的全部文件。
+ * 只扫描**将被推送的文件**（git 跟踪的）。
  *
- * 为什么：内部资料在本地磁盘上是存在的，用于开发流程，但被排除、不会进入
- * 公开仓库。若扫描全部磁盘文件，这些正当的内部文件会产生大量误报，
- * 而误报会导致这个检查被忽略——那就等于没有检查。
+ * 为什么：本地开发资料存在但不进入公开仓库。若扫描全部磁盘文件，
+ * 这些正当的内部文件会产生大量误报，而误报会导致检查被忽略——比没有更糟。
  */
 function listTrackedFiles() {
   const out = execFileSync('git', ['ls-files'], { encoding: 'utf8', cwd: ROOT })
@@ -48,7 +51,7 @@ function listTrackedFiles() {
     .filter((l) => l.length > 0 && TEXT_EXT.test(l))
 }
 
-/** A. 凭据类规则。通用模式，公开无妨。 */
+/** A. 凭据类规则（公开层）。通用模式，公开无妨。 */
 const CREDENTIAL_RULES = [
   [/sk-[A-Za-z0-9]{20,}/g, 'OpenAI 风格 API 密钥'],
   [/sk-ant-[A-Za-z0-9_-]{20,}/g, 'Anthropic API 密钥'],
@@ -64,7 +67,19 @@ const CREDENTIAL_RULES = [
 ]
 
 /**
- * 读取本地的私密词规则（不入库）。
+ * B. 内部资料引用规则（公开层）。
+ *
+ * 只检查"公开文件里有没有引用本地专属文档"这一件事——不涉及任何私密词，
+ * 因此规则本身可以公开。这条对任何 clone 者都有意义：
+ * 它保证仓库不会出现指向不存在文件的坏链接。
+ */
+const DANGLING_INTERNAL_REF_RULES = [
+  // 指向本地专属文档的路径引用（这些文件被 .git/info/exclude 排除，不随 clone 分发）
+  [/docs\/HANDOFF\.md|docs\/GOAL\.md|docs\/LOAD-TEST[^\s)`,。]*\.md/g, '引用了本地专属文档路径'],
+]
+
+/**
+ * 读取本地私密词规则（D 层，不入库）。
  * 格式：每行 `正则` 或 `正则|标签`；空行与 # 开头行忽略。
  * @returns {Array<[RegExp, string]>} 规则数组；文件缺失时为空数组
  */
@@ -81,7 +96,6 @@ function loadPrivateRules() {
     try {
       rules.push([new RegExp(pattern, 'g'), label])
     } catch {
-      // 规则写错了不该让检查崩掉，但要让人看见
       console.error(`⚠  private-terms.txt 中的规则无法解析：${line}`)
     }
   }
@@ -90,7 +104,8 @@ function loadPrivateRules() {
 
 /**
  * 读取本地排除名单（.git/info/exclude），取出其中的内部资料路径。
- * 跳过注释与通配符行，只保留具体的文件/目录条目。
+ * 用于 E 层路径级拦截：开发机上若把内部资料误加进索引，立即拦下。
+ * 跳过注释与通配符行，只保留具体条目。
  * @returns {string[]} 内部资料路径
  */
 function loadInternalPaths() {
@@ -99,11 +114,11 @@ function loadInternalPaths() {
     .split('\n')
     .map((l) => l.trim())
     .filter((l) => l.length > 0 && !l.startsWith('#') && !l.startsWith('!'))
-    .filter((l) => !l.includes('*')) // 通配条目无法做精确路径比对，跳过
+    .filter((l) => !l.includes('*'))
     .map((l) => l.replace(/\/$/, ''))
 }
 
-/** 判断一个被跟踪路径是否属于内部资料。 */
+/** 判断一个被跟踪路径是否属于内部资料（E 层）。 */
 function isInternalPath(rel, internalPaths) {
   const p = rel.replace(/\\/g, '/')
   return internalPaths.some((prefix) => p === prefix || p.startsWith(prefix + '/'))
@@ -116,28 +131,21 @@ const ALLOWLIST = [
   /example\.com/,
   /0{4,}/,
   // 本文件自身的规则定义里当然会出现这些词
-  /CREDENTIAL_RULES|ALLOWLIST/,
+  /CREDENTIAL_RULES|ALLOWLIST|DANGLING_INTERNAL_REF_RULES/,
   // 自检探针
   /SELF_TEST/,
 ]
 
-const internalPaths = loadInternalPaths()
 const privateRules = loadPrivateRules()
+const internalPaths = loadInternalPaths()
 const findings = []
 let scanned = 0
-
-if (internalPaths.length === 0 && privateRules.length === 0) {
-  console.log(
-    'ℹ 未找到本地规则文件（.git/info/private-terms.txt、.git/info/exclude 的内部条目）。',
-  )
-  console.log('  仅执行凭据检查。若这是你的开发机，请确认本地规则文件存在。')
-}
 
 for (const rel of listTrackedFiles()) {
   // 跳过本文件自身：它的规则定义里当然会出现这些关键词
   if (rel === 'scripts/check-secrets.mjs') continue
 
-  // C 类：内部路径级拦截（与内容无关，文件名即证据）
+  // E 层：内部路径级拦截（与内容无关，文件名即证据）
   if (isInternalPath(rel, internalPaths)) {
     findings.push({
       file: rel,
@@ -159,12 +167,14 @@ for (const rel of listTrackedFiles()) {
   scanned += 1
   const lines = content.split('\n')
 
-  for (const [rules, category] of [
+  const layers = [
     [CREDENTIAL_RULES, '凭据'],
+    [DANGLING_INTERNAL_REF_RULES, '内部资料引用'],
     [privateRules, '私密内容'],
-  ]) {
+  ]
+
+  for (const [rules, category] of layers) {
     for (const [re, label] of rules) {
-      // 逐行匹配：规则来自本地文件，无法保证带 g 标志，故按行处理
       for (let i = 0; i < lines.length; i += 1) {
         const lineText = lines[i]
         const probe = new RegExp(re.source, re.flags.includes('g') ? re.flags : re.flags + 'g')
@@ -196,11 +206,12 @@ if (!selfTestCaught) {
 }
 
 if (findings.length === 0) {
-  console.log(
-    `✅ 发布检查通过（扫描 ${scanned} 个待推送文件；` +
-      `凭据规则 ${CREDENTIAL_RULES.length} 条、本地私密规则 ${privateRules.length} 条、` +
-      `内部路径 ${internalPaths.length} 条）`,
-  )
+  const publicCount = CREDENTIAL_RULES.length + DANGLING_INTERNAL_REF_RULES.length
+  const localNote =
+    privateRules.length > 0
+      ? `公开层规则 ${publicCount} 条 + 本地层规则 ${privateRules.length} 条`
+      : `公开层规则 ${publicCount} 条（本地专属规则未加载，属正常：规则文件不随 clone 分发）`
+  console.log(`✅ 发布检查通过（扫描 ${scanned} 个文件；${localNote}）`)
   process.exit(0)
 }
 
