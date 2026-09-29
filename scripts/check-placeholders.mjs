@@ -32,7 +32,7 @@ const ACTIVE_FILES = [
   '.github/PULL_REQUEST_TEMPLATE.md',
   '.github/ISSUE_TEMPLATE/bug_report.md',
   '.github/ISSUE_TEMPLATE/feature_request.md',
-  '.github/dependabot.yml',
+  '.github/ISSUE_TEMPLATE/config.yml',
 ]
 
 /** 占位符模式。 */
