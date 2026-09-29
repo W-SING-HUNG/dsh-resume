@@ -154,6 +154,13 @@ export const VERIFY_PARAMETERS_JSON_SCHEMA = {
   properties: {
     original: { type: 'string', description: '候选人简历原文（改写前的原始内容）' },
     rewritten: { type: 'string', description: '改写后的简历内容（待校验）' },
+    claimedKeywords: {
+      type: 'array',
+      items: { type: 'string' },
+      description:
+        '可选：你声称已对齐的 JD 关键词。传入后会被回验——' +
+        '若某词并未真的出现在改写结果中，将判为未通过（防止虚报覆盖率）。',
+    },
   },
   required: ['original', 'rewritten'],
 }
@@ -184,8 +191,28 @@ export const VERIFY_VALUE_SCHEMA = {
       items: { type: 'string' },
       description: '本校验的已知局限（使用者须知晓边界，避免虚假安全感）',
     },
+    verifiedKeywords: {
+      type: 'array',
+      items: { type: 'string' },
+      description: '经回验确实出现在简历中的关键词（空数组表示未传入自报关键词）',
+    },
+    unverifiedKeywords: {
+      type: 'array',
+      items: { type: 'string' },
+      description: '声称已覆盖但实际未出现的关键词',
+    },
   },
-  required: ['ok', 'guardVersion', 'summary', 'issues', 'errorCount', 'warnCount', 'limitations'],
+  required: [
+    'ok',
+    'guardVersion',
+    'summary',
+    'issues',
+    'errorCount',
+    'warnCount',
+    'limitations',
+    'verifiedKeywords',
+    'unverifiedKeywords',
+  ],
 }
 
 /**
@@ -198,16 +225,18 @@ export const VERIFY_VALUE_SCHEMA = {
  * @property {number} errorCount error 级问题数量
  * @property {number} warnCount warn 级问题数量
  * @property {string[]} limitations 本校验的已知局限
+ * @property {string[]} verifiedKeywords 经回验确实出现的关键词
+ * @property {string[]} unverifiedKeywords 声称覆盖但未出现的关键词
  */
 
 /**
  * 纯函数：由原文与改写结果算出校验报告。
  *
- * @param {{ original?: unknown, rewritten?: unknown }} [args] 校验参数
+ * @param {{ original?: unknown, rewritten?: unknown, claimedKeywords?: string[] }} [args] 校验参数
  * @returns {VerifyToolValue} 严格匹配 VERIFY_VALUE_SCHEMA 的返回值
  * @throws {Error} 参数缺失或为空白时抛错
  */
-export function buildVerifyValue({ original, rewritten } = {}) {
+export function buildVerifyValue({ original, rewritten, claimedKeywords } = {}) {
   if (typeof original !== 'string' || original.trim() === '') {
     throw new Error('original 为必填参数，且不能为空或纯空白')
   }
@@ -215,7 +244,7 @@ export function buildVerifyValue({ original, rewritten } = {}) {
     throw new Error('rewritten 为必填参数，且不能为空或纯空白')
   }
 
-  const report = verifyRewrite({ original, rewritten })
+  const report = verifyRewrite({ original, rewritten, claimedKeywords })
   const issues = report.findings.map(
     (f) => `[${f.severity === 'error' ? '必须修正' : '建议检查'}] ${f.code}：${f.message}`,
   )
@@ -245,6 +274,8 @@ export function buildVerifyValue({ original, rewritten } = {}) {
     errorCount,
     warnCount,
     limitations: report.limitations,
+    verifiedKeywords: report.coverage?.verified ?? [],
+    unverifiedKeywords: report.coverage?.unverified ?? [],
   }
 }
 
@@ -277,6 +308,13 @@ export function createVerifyToolDefinition() {
           lines.push('', '明细：')
           for (const item of issues) lines.push(`- ${item}`)
         }
+        const unverified = Array.isArray(value?.unverifiedKeywords) ? value.unverifiedKeywords : []
+        const verified = Array.isArray(value?.verifiedKeywords) ? value.verifiedKeywords : []
+        if (verified.length > 0 || unverified.length > 0) {
+          lines.push('', '关键词回验（自报 ≠ 事实）：')
+          if (verified.length > 0) lines.push(`- 已证实出现在简历中：${verified.join('、')}`)
+          if (unverified.length > 0) lines.push(`- 声称覆盖但未出现：${unverified.join('、')}`)
+        }
         const limits = Array.isArray(value?.limitations) ? value.limitations : []
         if (limits.length > 0) {
           lines.push('', '本校验的已知边界（须自行确认）：')
@@ -290,10 +328,11 @@ export function createVerifyToolDefinition() {
      * @returns {Promise<object>} 非法输入时 reject
      */
     async execute(args) {
-      const { original, rewritten } = /** @type {{ original?: string, rewritten?: string }} */ (
-        args || {}
-      )
-      return buildVerifyValue({ original, rewritten })
+      const { original, rewritten, claimedKeywords } =
+        /** @type {{ original?: string, rewritten?: string, claimedKeywords?: string[] }} */ (
+          args || {}
+        )
+      return buildVerifyValue({ original, rewritten, claimedKeywords })
     },
     /**
      * 待执行状态的界面呈现意图。

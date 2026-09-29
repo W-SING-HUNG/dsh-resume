@@ -142,6 +142,7 @@ describe('守卫：契约与元信息', () => {
   test('报告结构稳定（供工具 output schema 使用）', () => {
     const report = verifyRewrite({ original: 'a', rewritten: 'a' })
     assert.deepEqual(Object.keys(report).sort(), [
+      'coverage',
       'findings',
       'guardVersion',
       'limitations',
@@ -269,6 +270,57 @@ describe('守卫：时间线一致性（日期属事实字段）', () => {
       !codes.includes('FABRICATED_NUMBER'),
       '日期不应同时被数字检查报告（重复报告会稀释报告可用性）',
     )
+  })
+})
+
+describe('守卫：关键词覆盖回验（模型自报不等于事实）', () => {
+  test('声称覆盖但未出现的词：必须报错', () => {
+    const report = verifyRewrite({
+      original: '负责前端开发。',
+      rewritten: '负责前端开发，使用 Vue2 与 Webpack。',
+      claimedKeywords: ['Vue2', 'Webpack', 'TypeScript'],
+    })
+    const finding = report.findings.find((f) => f.code === 'UNVERIFIED_KEYWORD_CLAIM')
+    assert.ok(finding, '声称覆盖 TypeScript 但文本里没有，必须报错')
+    assert.equal(finding.severity, 'error')
+    assert.deepEqual(finding.evidence, ['TypeScript'])
+  })
+
+  test('关键词确实出现（大小写不敏感）：不予报告', () => {
+    const report = verifyRewrite({
+      original: '负责前端开发。',
+      rewritten: '使用 vue2 与 Webpack 完成前端开发。',
+      claimedKeywords: ['Vue2', 'Webpack'],
+    })
+    assert.ok(
+      !report.findings.some((f) => f.code === 'UNVERIFIED_KEYWORD_CLAIM'),
+      '大小写不同但确实出现，不得报错',
+    )
+    assert.deepEqual(report.coverage.unverified, [])
+  })
+
+  test('回验结果区分已证实与未证实', () => {
+    const report = verifyRewrite({
+      original: '负责前端开发。',
+      rewritten: '使用 Vue2 开发。',
+      claimedKeywords: ['Vue2', 'TypeScript'],
+    })
+    assert.deepEqual(report.coverage.verified, ['Vue2'])
+    assert.deepEqual(report.coverage.unverified, ['TypeScript'])
+  })
+
+  test('不传自报关键词时为 null（向后兼容）', () => {
+    const report = verifyRewrite({ original: 'a', rewritten: 'a' })
+    assert.equal(report.coverage, null)
+  })
+
+  test('空关键词与非法输入被忽略', () => {
+    const report = verifyRewrite({
+      original: 'a',
+      rewritten: 'a',
+      claimedKeywords: ['', '   ', null, undefined, 'A'],
+    })
+    assert.deepEqual(report.coverage.unverified, [], '空项不得产生误报')
   })
 })
 

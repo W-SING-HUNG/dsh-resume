@@ -41,10 +41,13 @@ export function RESUME_SYSTEM_PROMPT(language = "zh") {
 
 【强制校验闭环】（必做，不可跳过）
 铁律不能只靠自觉。改写完成后，你必须调用 verify_rewrite 工具做确定性校验：
-  verify_rewrite(original = 简历原文, rewritten = 你改写后的简历全文)
-- 若返回 ok=false：说明改写引入了原文不存在的数字或机构名。
-  你必须**修正后重新校验**，直到 ok=true 才能交付。修正原则是删除或改写
-  那些编造内容，绝不允许"保留但说明"。
+  verify_rewrite(original = 简历原文, rewritten = 你改写后的简历全文,
+                 claimedKeywords = 你声称已对齐的 JD 关键词列表)
+- claimedKeywords 会被**回验**：你声称覆盖的每个词必须真的出现在改写结果里。
+  ★ 严禁虚报覆盖率——声称了却没写进去，会被判为未通过。
+- 若返回 ok=false：说明改写引入了原文不存在的数字/机构、或升格了职责、
+  或改动了日期、或关键词虚报。你必须**修正后重新校验**，直到 ok=true 才能交付。
+  修正原则是删除或改写那些编造内容，绝不允许"保留但说明"。
 - 若返回 ok=true 但有提醒（原文数据在改写后丢失）：评估是否为有意压缩；
   若不是，补回真实数据后重新校验。
 - 未通过校验就交付 = 违反铁律 = 任务失败。
@@ -73,10 +76,14 @@ ${language === "en" ? "全部输出使用英文。" : "全部输出使用简体�
 
 [Mandatory verification loop] (required, do not skip)
 The hard rules cannot rest on good intentions. After rewriting, you MUST call verify_rewrite:
-  verify_rewrite(original = original resume, rewritten = your rewritten resume)
-- If it returns ok=false, the rewrite introduced numbers or organizations absent from the
-  original. FIX the content and verify again until ok=true before delivering. Remove or
-  rephrase the fabricated parts; never "keep but annotate" them.
+  verify_rewrite(original = original resume, rewritten = your rewritten resume,
+                 claimedKeywords = the JD keywords you claim to have aligned)
+- claimedKeywords is verified: every keyword you claim must actually appear in the
+  rewrite. Do NOT overstate coverage: claiming a keyword you did not write in fails.
+- If it returns ok=false, the rewrite introduced numbers or organizations absent from
+  the original, inflated responsibility, altered a date, or overstated keyword coverage.
+  FIX the content and verify again until ok=true before delivering. Remove or rephrase
+  the fabricated parts; never "keep but annotate" them.
 - If ok=true with warnings (original data lost in the rewrite), restore genuine metrics
   unless the omission was intentional, then verify again.
 - Delivering without passing verification = violating the hard rules = task failure.

@@ -337,6 +337,40 @@ export function extractDateTokens(text) {
   return out
 }
 
+/**
+ * 回验"声称覆盖的关键词"是否真的出现在改写结果里。
+ *
+ * 【为什么需要】
+ * 改写流程中，模型可能自报"JD 要求的关键词我都对齐了"。
+ * 这是模型的自述，不是事实——它可能虚报，或记错了自己写了什么。
+ * 若不加回验，用户会拿到一份"看起来覆盖了关键词、实际没有"的简历，
+ * 在 ATS 筛选阶段被静默淘汰，且无从发现。
+ *
+ * 同类项目中有一个（`NI3singh/AI-Resume-Updater`）做了这件事：
+ * 把模型自报的 covered_keywords 拿去最终文本里逐一查找，查不到就不计入。
+ * 本项目独立实现同样的思路。
+ *
+ * @param {string} rewritten 改写后的文本（最终产出）
+ * @param {string[]} claimedKeywords 模型声称已覆盖的关键词
+ * @returns {{ verified: string[], unverified: string[] }}
+ *   `verified` 为确实出现的词；`unverified` 为声称了但查无实据的词
+ */
+export function verifyKeywordCoverage(rewritten, claimedKeywords) {
+  const text = normalizeText(rewritten).toLowerCase()
+  const verified = []
+  const unverified = []
+  for (const raw of Array.isArray(claimedKeywords) ? claimedKeywords : []) {
+    const keyword = String(raw ?? '').trim()
+    if (keyword === '') continue
+    if (text.includes(keyword.toLowerCase())) {
+      verified.push(keyword)
+    } else {
+      unverified.push(keyword)
+    }
+  }
+  return { verified, unverified }
+}
+
 /** 全角数字转半角。 */
 const FULLWIDTH_DIGITS = '０１２３４５６７８９'
 
@@ -519,6 +553,8 @@ function appearsIn(candidate, haystack) {
  * @property {string} guardVersion 校验规则版本
  * @property {GuardFinding[]} findings 问题清单
  * @property {string[]} limitations 本校验的已知局限
+ * @property {{ verified: string[], unverified: string[] } | null} coverage
+ *   关键词覆盖回验结果；未提供自报关键词时为 null
  * @property {{ originalNumbers: number, rewrittenNumbers: number, originalEntities: number, rewrittenEntities: number }} stats 统计
  */
 
@@ -528,14 +564,18 @@ function appearsIn(candidate, haystack) {
  * 检查项：
  *   1. `FABRICATED_NUMBER`（error）— 改写后出现原文没有的数字
  *   2. `FABRICATED_ENTITY`（error）— 改写后出现原文没有的机构/专名
- *   3. `LOST_NUMBER`（warn）— 原文的数字在改写后消失（真实数据被丢弃）
+ *   3. `RESPONSIBILITY_INFLATED`（error）— 职责强度被升格
+ *   4. `FABRICATED_DATE`（error）— 时间点被改动
+ *   5. `LOST_NUMBER`（warn）— 原文的数字在改写后消失
+ *   6. `UNVERIFIED_KEYWORD_CLAIM`（error）— 自报覆盖的关键词实际未出现
  *
  * 判定结果为纯数据，不含任何模型判断。
  *
- * @param {{ original?: unknown, rewritten?: unknown }} [args] 原文与改写后文本
+ * @param {{ original?: unknown, rewritten?: unknown, claimedKeywords?: string[] }} [args]
+ *   原文、改写后文本，以及可选的"模型自报已覆盖的关键词"
  * @returns {GuardReport} 校验报告；`ok` 为 true 表示无 error 级问题
  */
-export function verifyRewrite({ original, rewritten } = {}) {
+export function verifyRewrite({ original, rewritten, claimedKeywords } = {}) {
   const originalText = normalizeText(original)
   const rewrittenText = normalizeText(rewritten)
   /** @type {GuardFinding[]} */
@@ -681,6 +721,26 @@ export function verifyRewrite({ original, rewritten } = {}) {
     })
   }
 
+  // ── 6. 关键词覆盖回验（可选的模型自报项）───────────────────────
+  //
+  // 模型可能自报"JD 关键词都已对齐"。这是自述而非事实，
+  // 必须拿去最终文本里查证；查不到就不予采信，
+  // 否则用户会拿到"声称覆盖、实际没有"的简历，在 ATS 阶段被静默淘汰。
+  const coverage =
+    claimedKeywords === undefined
+      ? null
+      : verifyKeywordCoverage(rewrittenText, claimedKeywords)
+  if (coverage && coverage.unverified.length > 0) {
+    findings.push({
+      code: 'UNVERIFIED_KEYWORD_CLAIM',
+      severity: 'error',
+      message:
+        `声称已覆盖但实际未出现在简历中的关键词：${coverage.unverified.join('、')}。` +
+        '关键词对齐必须以真实出现为准；这些词要么写进对应经历，要么移入待补充清单。',
+      evidence: coverage.unverified,
+    })
+  }
+
   const hasError = findings.some((f) => f.severity === 'error')
 
   return {
@@ -688,6 +748,7 @@ export function verifyRewrite({ original, rewritten } = {}) {
     guardVersion: GUARD_VERSION,
     findings,
     limitations: GUARD_LIMITATIONS,
+    coverage,
     stats: {
       originalNumbers: originalNumbers.size,
       rewrittenNumbers: rewrittenNumbers.size,
