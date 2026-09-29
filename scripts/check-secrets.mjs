@@ -105,8 +105,9 @@ function loadPrivateRules() {
 /**
  * 读取本地排除名单（.git/info/exclude），取出其中的内部资料路径。
  * 用于 E 层路径级拦截：开发机上若把内部资料误加进索引，立即拦下。
- * 跳过注释与通配符行，只保留具体条目。
- * @returns {string[]} 内部资料路径
+ *
+ * 跳过注释与否定行（`!` 开头是显式放行，不是内部资料）。
+ * @returns {string[]} 内部资料路径模式
  */
 function loadInternalPaths() {
   if (!existsSync(LOCAL_EXCLUDE)) return []
@@ -114,14 +115,43 @@ function loadInternalPaths() {
     .split('\n')
     .map((l) => l.trim())
     .filter((l) => l.length > 0 && !l.startsWith('#') && !l.startsWith('!'))
-    .filter((l) => !l.includes('*'))
+    .filter((l) => !l.startsWith('node_modules') && !l.startsWith('coverage'))
     .map((l) => l.replace(/\/$/, ''))
 }
 
-/** 判断一个被跟踪路径是否属于内部资料（E 层）。 */
+/**
+ * 判断一个被跟踪路径是否属于内部资料（E 层）。
+ *
+ * 判定方式：**直接问 git**，而不是自己解析名单。
+ *
+ * 为什么（真实事故，2026-09-28）：
+ * 原先的实现是"读 .git/info/exclude 的条目，逐个前缀比对"。
+ * 但有人新增了 docs/REPO-COMPARISON.md 却忘了登记到名单里，
+ * 于是检查放行、文件被提交进公开仓库——**枚举式名单必然滞后**。
+ * 改为让 git 自己回答"这个文件是否被忽略"之后，
+ * 名单里有没有登记都不影响判定：只要 git 认为它该被忽略，就是内部资料。
+ *
+ * 注：对已被跟踪的文件用 `git check-ignore` 会因 --no-index 需要而特殊处理；
+ * 这里用 `git check-ignore --no-index` 查询路径规则本身。
+ *
+ * @param {string} rel 仓库相对路径
+ * @returns {boolean} 是否被本地排除规则命中
+ */
+function isIgnoredByGit(rel) {
+  try {
+    // --no-index：即使文件已被跟踪也照常评估排除规则
+    execFileSync('git', ['check-ignore', '--no-index', '-q', rel], { cwd: ROOT, stdio: 'pipe' })
+    return true
+  } catch {
+    return false
+  }
+}
+
+/** 兼容旧调用：路径是否属于内部资料（供使用模式列表的场景）。 */
 function isInternalPath(rel, internalPaths) {
   const p = rel.replace(/\\/g, '/')
-  return internalPaths.some((prefix) => p === prefix || p.startsWith(prefix + '/'))
+  if (internalPaths.some((prefix) => p === prefix || p.startsWith(prefix + '/'))) return true
+  return false
 }
 
 /** 允许的例外：正当的示例值与经确认的用途。 */
@@ -145,14 +175,18 @@ for (const rel of listTrackedFiles()) {
   // 跳过本文件自身：它的规则定义里当然会出现这些关键词
   if (rel === 'scripts/check-secrets.mjs') continue
 
-  // E 层：内部路径级拦截（与内容无关，文件名即证据）
-  if (isInternalPath(rel, internalPaths)) {
+  // E 层：内部路径级拦截。
+  //
+  // 判定由 git 给出（check-ignore），不看我们自己维护的名单 ——
+  // 因为"名单忘了登记"正是上一版漏掉 docs/REPO-COMPARISON.md 的原因。
+  // 只要本地排除规则认为它该被忽略，而它却被跟踪了，就是事故。
+  if (isIgnoredByGit(rel) || isInternalPath(rel, internalPaths)) {
     findings.push({
       file: rel,
       line: 0,
       category: '内部资料（路径级）',
       label: '内部资料文件被纳入版本库',
-      preview: '该文件在本地排除名单中，不应被跟踪；请从索引移除（git rm --cached）',
+      preview: '该路径命中本地排除规则，不应被跟踪；请从索引移除（git rm --cached）',
     })
     continue
   }
