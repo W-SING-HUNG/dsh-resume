@@ -26,7 +26,7 @@ jobs:
         node: ['20', '22', '24']
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Setup Node ${{ matrix.node }}
         uses: actions/setup-node@v4
@@ -65,7 +65,7 @@ jobs:
     name: Architecture guards
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Plugin must not import platform packages
         run: |
