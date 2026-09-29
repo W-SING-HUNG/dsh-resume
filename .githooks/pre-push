@@ -1,0 +1,30 @@
+#!/bin/sh
+# 推送前守卫：密钥一旦进入远端历史，清理代价极高，因此在推送前拦一道。
+#
+# 与 CI 的分工：
+#   pre-commit  本地拦截 —— 文档同步 / 平台包 import / 依赖污染 / 铁律削弱
+#   pre-push    本地拦截 —— 敏感信息泄露（本文件）
+#   CI          远端复核 —— 以上全部 + 九平台测试矩阵
+#
+# 跳过方式（仅限确认安全时）：git push --no-verify
+
+echo "▶ 推送前检查..."
+
+if ! node scripts/check-secrets.mjs; then
+  echo ""
+  echo "BLOCKED: 检测到潜在敏感信息，推送已中止。"
+  echo "推送后远端历史几乎无法彻底清除，请先在本地处理。"
+  echo "若确认是安全示例值，加入 scripts/check-secrets.mjs 的 ALLOWLIST。"
+  exit 1
+fi
+
+# 完整验证（比 pre-commit 更严格：跑测试）
+if ! npm run verify >/dev/null 2>&1; then
+  echo ""
+  echo "BLOCKED: npm run verify 未通过，推送已中止。"
+  echo "请在本地跑 npm run verify 查看具体失败项。"
+  exit 1
+fi
+
+echo "✓ 推送前检查通过"
+exit 0

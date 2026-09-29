@@ -1,0 +1,42 @@
+# 行尾与编码规则
+#
+# 背景（本仓库真实踩过的坑）：
+#   - .githooks/* 带 CRLF → sh 直接报错；带 BOM → shebang 失效
+#   - .ps1 在 Windows PowerShell 5.1 上若无 BOM，中文按 ANSI 解码变乱码
+#   - 这两条规则相反，因此必须按文件类型分别声明（不能靠全局默认）
+
+# 默认：文本文件统一 LF 行尾
+* text=auto eol=lf
+
+# Git 钩子必须 LF + 无 BOM，否则 sh 无法执行。
+# `-text` 禁止行尾转换，确保字节原样。
+/.githooks/** -text
+
+# shell 脚本同样必须 LF
+*.sh text eol=lf
+*.bash text eol=lf
+
+# PowerShell 脚本用 CRLF（Windows 原生习惯）。
+# 注意：BOM 由文件内容决定，git 不会自动增删；含中文的 .ps1 必须自带 UTF-8 BOM。
+*.ps1 text eol=crlf
+*.psm1 text eol=crlf
+*.psd1 text eol=crlf
+
+# 二进制资源
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.woff binary
+*.woff2 binary
+
+# 锁文件不参与行尾转换（虽未提交，但防止误加时被改）
+package-lock.json -text
+pnpm-lock.yaml -text
+
+# 文档与配置使用 LF
+*.md text eol=lf
+*.json text eol=lf
+*.yml text eol=lf
+*.yaml text eol=lf

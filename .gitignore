@@ -1,0 +1,51 @@
+# ── 内部资料（不公开）────────────────────────────────────────────────
+# 这些文件是项目运作的内部记录，不属于对外发布内容。
+# 本地保留以便开发流程延续，但不进入版本库、不上传。
+# 说明：多人协作时，此类文件通常放在私有仓库或 wiki，公开仓库只留发布物。
+AGENTS.md
+workflow.md
+docs/GOAL.md
+docs/HANDOFF.md
+docs/LOAD-TEST.md
+docs/LOAD-TEST-RESULT.md
+docs/v0.2-client/
+
+# ── 依赖 ─────────────────────────────────────────────────────────────
+node_modules/
+.pnpm-store/
+
+# 锁文件：本项目是插件（库）而非应用，按 npm 惯例不提交 lock。
+# 消费者不使用 devDependencies，锁文件只会带来维护负担。
+# 若将来发布为应用，应移除本行并提交 lock 以保证部署可复现。
+package-lock.json
+pnpm-lock.yaml
+yarn.lock
+
+# 构建与检查产物
+*.tsbuildinfo
+coverage/
+.nyc_output/
+
+# 日志与本地环境
+*.log
+npm-debug.log*
+pnpm-debug.log*
+.env
+.env.local
+
+# 编辑器与系统
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/*
+!.vscode/extensions.json
+
+# 临时与备份文件
+*.bak
+*.tmp
+*~
+*.orig
+*.rej
+
+# 本项目的 hook 备份（setup-hooks.ps1 产物）
+.githooks/*.bak

@@ -1,0 +1,4 @@
+# dsh-resume bundle patch：插入求职简历工坊插件行。
+- insert:
+    - id: resume-studio
+      name: 'dsh-resume'

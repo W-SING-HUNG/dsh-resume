@@ -1,0 +1,71 @@
+{
+  "name": "dsh-resume",
+  "version": "0.1.0",
+  "description": "求职简历工坊：粘贴 JD，AI 按岗位重写简历，只基于真实内容，不编造 — DSH bundle。",
+  "license": "MIT",
+  "type": "module",
+  "main": "src/index.js",
+  "exports": {
+    ".": "./src/index.js",
+    "./core": "./src/core.js",
+    "./prompt": "./src/prompt.js",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "src/",
+    "cordis.patch.yml",
+    "README.md",
+    "CHANGELOG.md",
+    "LICENSE"
+  ],
+  "keywords": [
+    "dsh",
+    "dsh-plugin",
+    "dsh-bundle",
+    "resume",
+    "cv",
+    "job",
+    "求职",
+    "简历",
+    "校招",
+    "秋招"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "lint": "node --check src/index.js && node --check src/core.js && node --check src/prompt.js",
+    "typecheck": "tsc --noEmit",
+    "test": "node scripts/run-tests.mjs",
+    "test:coverage": "node scripts/run-tests.mjs --coverage",
+    "check:docs": "node scripts/check-docs.mjs",
+    "check:secrets": "node scripts/check-secrets.mjs",
+    "check:placeholders": "node scripts/check-placeholders.mjs",
+    "example": "node examples/rewrite-demo.mjs",
+    "verify": "npm run lint && npm run typecheck && npm run check:docs && npm run check:secrets && npm run check:placeholders && npm run test && npm run example",
+    "test:all": "npm run verify"
+  },
+  "dependencies": {},
+  "peerDependencies": {
+    "@deepseek-ai/cordis": "^4.0.2"
+  },
+  "devDependencies": {
+    "@deepseek-ai/dsh-tools": "^0.1.5-rc.2",
+    "@types/node": "^26.0.0",
+    "typescript": "^7.0.0"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  },
+  "author": "W-SING-HUNG",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/W-SING-HUNG/dsh-resume.git"
+  },
+  "bugs": {
+    "url": "https://github.com/W-SING-HUNG/dsh-resume/issues"
+  },
+  "homepage": "https://github.com/W-SING-HUNG/dsh-resume#readme"
+}

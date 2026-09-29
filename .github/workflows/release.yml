@@ -1,0 +1,73 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: '仅打包不发布'
+        type: boolean
+        default: true
+
+permissions:
+  contents: write
+
+jobs:
+  verify-and-release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install dev dependencies
+        run: npm install --no-audit --no-fund
+
+      # 发布前必须全绿——这是最后一道防线
+      - name: Full verification
+        run: npm run verify
+
+      - name: Guard - dependencies must be empty
+        run: |
+          node -e "
+            const p = require('./package.json');
+            const deps = Object.keys(p.dependencies ?? {});
+            if (deps.length > 0) {
+              console.error('::error::发布前检查失败：dependencies 必须为空，当前：' + deps.join(', '));
+              process.exit(1);
+            }
+            console.log('✅ dependencies 为空');
+          "
+
+      - name: Guard - no platform imports in src
+        run: |
+          if grep -rnE "^[[:space:]]*(import|export)[^;]*from[[:space:]]+['\"]@deepseek-ai/" src/; then
+            echo "::error::发布前检查失败：src/ 不得 import 平台包"
+            exit 1
+          fi
+          echo "✅ 零平台依赖"
+
+      - name: Pack (dry run)
+        run: npm pack --dry-run
+
+      - name: Create GitHub Release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          body: |
+            详见 [CHANGELOG.md](https://github.com/${{ github.repository }}/blob/main/CHANGELOG.md)。
+
+            ### 安装
+
+            ```bash
+            dsh plugin --profile <profile> add "file:///$DSH_HOME/plugins/dsh-resume"
+            ```
+
+            插件需加入 profile 的 `dsh.profile.bundles` 列表后生效，详见 [README](https://github.com/${{ github.repository }}#快速开始)。

@@ -1,0 +1,110 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+    branches: [main, master]
+  workflow_dispatch:
+
+# 同一分支的新推送取消上一次未完成的运行，节省额度
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Test / ${{ matrix.os }} / Node ${{ matrix.node }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+        node: ['20', '22', '24']
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node ${{ matrix.node }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+
+      - name: Install dev dependencies
+        run: npm install --no-audit --no-fund
+
+      - name: Syntax check
+        run: npm run lint
+
+      - name: Type check (JSDoc + checkJs)
+        run: npm run typecheck
+
+      # 文档一致性：文档里引用的路径与 npm script 必须真实存在。
+      # 第九轮迁移测试结构时曾留下 17 处失效引用，此检查防复发。
+      - name: Docs consistency
+        run: npm run check:docs
+
+      # 覆盖四组测试：业务铁律 / 契约 / 装载路径 / 真机 schema 校验。
+      # schema 组需要本机 DSH 安装，CI 上找不到时优雅跳过（exit 0），
+      # 但仍执行以验证"跳过路径"本身不崩。
+      - name: Test suite (92 checks)
+        run: npm test
+
+      - name: Coverage report
+        run: npm run test:coverage
+
+      - name: Runnable example
+        run: npm run example
+
+  # 独立的硬约束守卫：插件一旦 import 平台包就会在真机崩溃，
+  # 这里用 grep 做静态拦截，比等运行时炸掉早得多。
+  guards:
+    name: Architecture guards
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Plugin must not import platform packages
+        run: |
+          set -e
+          if grep -rnE "^[[:space:]]*(import|export)[^;]*from[[:space:]]+['\"]@deepseek-ai/" src/; then
+            echo "::error::插件源码禁止 import @deepseek-ai/*（会造成模块双实例，真机运行时崩溃）"
+            exit 1
+          fi
+          echo "✅ 零平台依赖检查通过"
+
+      - name: dependencies must stay empty
+        run: |
+          node -e "
+            const p = require('./package.json');
+            const deps = Object.keys(p.dependencies ?? {});
+            if (deps.length > 0) {
+              console.error('::error::dependencies 必须为空，否则 pnpm 会在目标 profile 装出第二份平台包。当前：' + deps.join(', '));
+              process.exit(1);
+            }
+            console.log('✅ dependencies 为空');
+          "
+
+      - name: Anti-fabrication iron rules must remain intact
+        run: |
+          set -e
+          node -e "
+            const fs = require('node:fs');
+            const src = fs.readFileSync('src/prompt.js', 'utf8');
+            const required = ['禁止编造', '待补充', 'NEVER invent', 'To Add'];
+            const missing = required.filter((k) => !src.includes(k));
+            if (missing.length > 0) {
+              console.error('::error::反虚构铁律被削弱，缺失关键词：' + missing.join(', '));
+              process.exit(1);
+            }
+            console.log('✅ 反虚构铁律完整');
+          "
+
+      - name: Secret scan
+        run: npm run check:secrets
+
+      - name: Placeholder audit
+        run: npm run check:placeholders

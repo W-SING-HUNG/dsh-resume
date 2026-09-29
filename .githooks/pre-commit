@@ -1,0 +1,72 @@
+#!/bin/sh
+# 提交前守卫：拦住会导致发布事故的问题。
+#
+# 检查项：
+#   1. src/ 出现平台包 import（会导致真机运行时崩溃）
+#   2. package.json 的 dependencies 非空（会造成模块双实例）
+#   3. 反虚构铁律关键词被削弱
+#   4. 提交内容含潜在敏感信息
+#
+# 跳过方式（仅限确认安全时）：git commit --no-verify
+
+fail() {
+  echo ""
+  echo "BLOCKED: $1"
+  shift
+  for line in "$@"; do echo "  $line"; done
+  echo ""
+  exit 1
+}
+
+STAGED=$(git diff --cached --name-only)
+
+# ── 1. 平台包 import 守卫 ──────────────────────────────────────────
+PLATFORM_IMPORTS=$(git diff --cached -U0 -- src/ \
+  | grep -E "^\+" \
+  | grep -vE "^\+\+\+" \
+  | grep -E "(import|export)[^;]*from[[:space:]]+['\"]@deepseek-ai/" || true)
+if [ -n "$PLATFORM_IMPORTS" ]; then
+  fail "src/ 中新增了平台包 import —— 会导致真机运行时崩溃。" \
+       "（模块双实例：TOOL_RUNTIME_SCHEDULER Symbol 分叉）" \
+       "改为直接 ctx.tools.register({...普通对象})，详见 CONTRIBUTING.md。" \
+       "违规行：" \
+       "$PLATFORM_IMPORTS"
+fi
+
+# ── 2. dependencies 必须为空 ───────────────────────────────────────
+if echo "$STAGED" | grep -qE "^package\.json$"; then
+  DEPS=$(node -e "
+    const p = require('./package.json');
+    console.log(Object.keys(p.dependencies ?? {}).join(','));
+  " 2>/dev/null || echo "")
+  if [ -n "$DEPS" ]; then
+    fail "package.json 的 dependencies 非空 —— 会让 pnpm 在目标 profile 装出第二份平台包。" \
+         "当前：$DEPS" \
+         "平台包只能放 devDependencies。详见 CONTRIBUTING.md。"
+  fi
+fi
+
+# ── 3. 反虚构铁律守卫 ──────────────────────────────────────────────
+if echo "$STAGED" | grep -qE "^src/prompt\.js$"; then
+  MISSING=$(node -e "
+    const fs = require('node:fs');
+    const src = fs.readFileSync('src/prompt.js', 'utf8');
+    const required = ['禁止编造', '待补充', 'NEVER invent', 'To Add'];
+    console.log(required.filter((k) => !src.includes(k)).join(','));
+  " 2>/dev/null || echo "")
+  if [ -n "$MISSING" ]; then
+    fail "反虚构铁律被削弱 —— 缺失关键词：$MISSING" \
+         "这是本项目的存在理由，任何削弱都会被拒绝。详见 CONTRIBUTING.md。"
+  fi
+fi
+
+# ── 4. 敏感信息扫描 ────────────────────────────────────────────────
+if [ -f scripts/check-secrets.mjs ]; then
+  if ! node scripts/check-secrets.mjs >/dev/null 2>&1; then
+    fail "检测到潜在敏感信息（密钥 / 令牌 / 凭据）。" \
+         "改完再提交。查看详情：npm run check:secrets"
+  fi
+fi
+
+echo "✓ pre-commit 检查通过"
+exit 0

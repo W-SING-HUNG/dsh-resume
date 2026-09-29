@@ -1,0 +1,13 @@
+# Issue 模板选择器配置
+# GitHub 官方文档：configuring-issue-templates-for-your-repository
+
+# 仍允许提交空白 issue（保留灵活性，不强制走模板）
+blank_issues_enabled: true
+
+contact_links:
+  - name: 报告安全漏洞
+    url: https://github.com/W-SING-HUNG/dsh-resume/security/advisories/new
+    about: 请勿公开提交安全问题。使用 GitHub 私密漏洞报告，详见 SECURITY.md。
+  - name: 使用问题与讨论
+    url: https://github.com/W-SING-HUNG/dsh-resume/discussions
+    about: 安装、配置、DSH 集成等使用类问题，欢迎在此交流。
