@@ -7,6 +7,22 @@
 
 ### Added
 
+- **补齐 DSH STORE 收录所需的 manifest 声明**（为上架做准备，均经真机核对）：
+  官方收录标准第 8 项检查面要求"精确 DSH 版本"，缺失时结果为 unknown，
+  而「未知即停止晋级」。此前 `package.json` 只有 `engines.node`，
+  没有 `engines.dsh`，也没有 `dsh.pluginType` 与 `dsh.compatibility`。现补上：
+  - `engines.dsh: ">=0.1.5-rc.2 <0.2.0-0"`
+  - `dsh.pluginType: "feature"`
+  - `dsh.compatibility: { dsh: 同上, profiles: ["web", "headless"] }`
+
+  **版本范围取实测值，不抄参照项目**：本机全部平台包（`dsh` / `dsh-base` /
+  `dsh-tools` / `dsh-web-app`）与 CLI 自报版本均为 `0.1.5-rc.2`，故下界取之。
+  生态内某参照项目声明 `>=0.1.0-rc.6`，但**我们在 rc.6 上未做任何验证，
+  声明未验证过的兼容范围属于虚假宣称**。
+
+  `profiles` 只列实际验证过的两个：`web` 与 `headless`。
+  未验证的 profile 不写入声明。
+
 - **交付关：反虚构校验在导出环节由代码强制**（产品级补强，最重要的一条）：
   此前校验只发生在 `verify_rewrite`。模型若跳过它直接调 `export_resume`，
   用户就会拿到**未经校验、可能含编造内容**的简历——等于把「绝不编造」这条

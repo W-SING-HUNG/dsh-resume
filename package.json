@@ -31,7 +31,8 @@
     "秋招"
   ],
   "engines": {
-    "node": ">=20"
+    "node": ">=20",
+    "dsh": ">=0.1.5-rc.2 <0.2.0-0"
   },
   "scripts": {
     "lint": "node --check src/index.js && node --check src/core.js && node --check src/prompt.js",
@@ -58,6 +59,11 @@
     "typescript": "^7.0.0"
   },
   "dsh": {
+    "pluginType": "feature",
+    "compatibility": {
+      "dsh": ">=0.1.5-rc.2 <0.2.0-0",
+      "profiles": ["web", "headless"]
+    },
     "bundle": {
       "patch": "./cordis.patch.yml"
     }
