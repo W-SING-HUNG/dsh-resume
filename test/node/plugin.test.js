@@ -16,6 +16,7 @@ import {
   inject,
   TOOL_NAME,
   VERIFY_TOOL_NAME,
+  EXPORT_TOOL_NAME,
   SECTION_NAME,
   sectionText,
 } from '../../src/index.js'
@@ -141,12 +142,12 @@ describe('apply(ctx) 装载路径', () => {
     assert.equal(calls.sections[0].order, 2900)
   })
 
-  test('恰好注册 2 个工具：改写 + 反虚构校验', () => {
+  test('恰好注册 3 个工具：改写 + 反虚构校验 + 文件导出', () => {
     const { ctx, calls } = createSpyCtx()
     apply(ctx)
-    assert.equal(calls.tools.length, 2)
+    assert.equal(calls.tools.length, 3)
     const names = calls.tools.map((t) => t.name).sort()
-    assert.deepEqual(names, [TOOL_NAME, VERIFY_TOOL_NAME].sort())
+    assert.deepEqual(names, [TOOL_NAME, VERIFY_TOOL_NAME, EXPORT_TOOL_NAME].sort())
   })
 
   test('每个注册的工具都带完整执行契约', () => {
@@ -172,8 +173,13 @@ describe('apply(ctx) 装载路径', () => {
   test('apply 与测试使用同一份定义来源（无重复实现）', async () => {
     const { ctx, calls } = createSpyCtx()
     apply(ctx)
-    const { createToolDefinition, createVerifyToolDefinition } = await import('../../src/core.js')
-    const expected = [createToolDefinition(), createVerifyToolDefinition()]
+    const { createToolDefinition, createVerifyToolDefinition, createExportToolDefinition } =
+      await import('../../src/core.js')
+    const expected = [
+      createToolDefinition(),
+      createVerifyToolDefinition(),
+      createExportToolDefinition(async () => {}),
+    ]
     for (const def of expected) {
       const actual = calls.tools.find((t) => t.name === def.name)
       assert.ok(actual, `未注册 ${def.name}`)
@@ -187,8 +193,8 @@ describe('apply(ctx) 装载路径', () => {
     const b = createSpyCtx()
     apply(a.ctx)
     apply(b.ctx)
-    assert.equal(a.calls.tools.length, 2)
-    assert.equal(b.calls.tools.length, 2)
+    assert.equal(a.calls.tools.length, 3)
+    assert.equal(b.calls.tools.length, 3)
     assert.notEqual(a.calls.tools[0], b.calls.tools[0])
     assert.deepEqual(
       a.calls.tools.map((t) => t.name),

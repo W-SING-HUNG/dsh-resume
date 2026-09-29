@@ -44,6 +44,7 @@
     "check:guard": "node scripts/check-guard.mjs",
     "example": "node examples/rewrite-demo.mjs",
     "demo:guard": "node scripts/gen-readme-demo.mjs",
+    "demo:export": "node scripts/gen-export-demo.mjs",
     "verify": "npm run lint && npm run typecheck && npm run check:docs && npm run check:secrets && npm run check:placeholders && npm run check:guard && npm run test && npm run example",
     "test:all": "npm run verify"
   },

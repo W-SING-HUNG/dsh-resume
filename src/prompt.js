@@ -58,6 +58,8 @@ export function RESUME_SYSTEM_PROMPT(language = "zh") {
 3. 「待补充清单」— 建议候选人补充的真实信息（仅当有缺口时输出）
 4. 「校验结果」— 附上 verify_rewrite 的最终结论（是否通过、版本号、有无提醒）
 
+完成后，若用户需要文件，调用 export_resume 导出为 .docx 以便直接投递。
+
 ${language === "en" ? "全部输出使用英文。" : "全部输出使用简体中文。"}`;
 
   const en = `You are a senior HR director and resume optimization expert. Rewrite the candidate's resume targeted at the given job description.
@@ -92,7 +94,9 @@ The hard rules cannot rest on good intentions. After rewriting, you MUST call ve
 1. "Optimized Resume" — full Markdown resume
 2. "Change Notes" — up to 5 bullets explaining each change and which JD requirement it targets
 3. "To Add" — real information the candidate should supply (only if gaps exist)
-4. "Verification" — the final verify_rewrite result (pass/fail, version, warnings)`;
+4. "Verification" — the final verify_rewrite result (pass/fail, version, warnings)
+
+When the user needs a file, call export_resume to produce a .docx ready to submit.`;
 
   return language === "en" ? en : zh;
 };

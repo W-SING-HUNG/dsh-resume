@@ -404,6 +404,32 @@ describe('守卫：整条新增检测（特征比对抓不住的造假）', () =
       '无原文可比时不得判定新增',
     )
   })
+
+  test('补全简历头部（姓名/求职意向/联系方式）：不得误报为新增', () => {
+    // 关键回归用例（真实缺陷，由端到端演示发现）：
+    // 改写流程中补全头部是正常且必需的操作——用户原文常常只有经历部分。
+    // 早期实现把「求职意向：前端开发工程师」报为凭空新增，导致无法通过校验。
+    const original = '- 使用 Vue2 完成商品列表模块开发；'
+    const rewritten =
+      '# 示例候选人\n\n求职意向：前端开发工程师\n\n' +
+      '联系方式：candidate@example.com\n\n' +
+      '- 负责使用 Vue2 完成商品列表模块的开发；'
+    const report = verifyRewrite({ original, rewritten })
+    assert.ok(
+      !report.findings.some((f) => f.code === 'NOVEL_CONTENT'),
+      '结构性头部不应被判为编造',
+    )
+  })
+
+  test('头部字段被改动时，数字检查仍生效', () => {
+    // 排除头部只作用于"整条新增"判定，其它检查必须全量生效
+    const report = verifyRewrite({
+      original: '联系方式：138-0000-0000\n- 负责前端开发工作；',
+      rewritten: '联系方式：139-1111-2222\n- 负责前端开发工作；',
+    })
+    assert.equal(report.ok, false, '改掉电话号必须被数字检查抓住')
+    assert.ok(report.findings.some((f) => f.code === 'FABRICATED_NUMBER'))
+  })
 })
 
 describe('守卫：防误报（误报会让守卫被忽略，比漏报更糟）', () => {

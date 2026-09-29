@@ -71,7 +71,8 @@ dsh web
 >
 > **【我的简历】** …简历原文…
 
-模型会自动调用工具，交付四部分：**优化后简历 / 改动说明 / 待补充清单 / 校验结果**。
+模型会自动调用工具，交付四部分：**优化后简历 / 改动说明 / 待补充清单 / 校验结果**，
+并可按需导出为**可直接投递的 `.docx` 文件**——不用自己复制排版。
 
 ### 它实际拦住了什么
 
@@ -160,12 +161,35 @@ npm run demo:guard   # 只看守卫拦住编造的过程
 |---|---|---|
 | JD × 简历 → 定制简历 | ✅ | ATS 关键词对齐、经历权重重排 |
 | **反虚构代码守卫** | ✅ | **确定性校验，不依赖模型自觉**，见下节 |
+| **一键导出可投递 .docx** | ✅ | 零依赖生成，单栏 A4，ATS 可解析 |
 | 改动说明 | ✅ | 每处改动对应 JD 哪条要求，5 条以内 |
 | 待补充清单 | ✅ | JD 要求但简历缺失的能力，**明示而非编造** |
 | 会话内工具调用 | ✅ | agent 可自动识别意图并调用 |
 | 中英双语 | ✅ | `language: 'zh' \| 'en'` |
 | 独立双栏 UI 面板 | 计划中 | client half |
-| 导出 PDF / Word | 计划中 | 排版件生成 |
+
+### 导出的文件长什么样
+
+调用 `export_resume` 会直接产出文件，不用手动复制：
+
+```
+verify_rewrite → ok = true
+export_resume  → 已导出 DOCX 文件（1454 字节）到 ./投递版简历.docx
+```
+
+生成的 `.docx` 是**零依赖手写 OOXML**（本项目运行时依赖为 0）：
+单栏版式、A4 页边距、项目符号段落，Word / WPS / Google Docs 均可直接打开。
+版式刻意保持简洁——**复杂排版会导致 ATS 解析失败**，这在简历领域是已知问题。
+
+两种导出模式：
+
+| 模式 | 内容 | 用途 |
+|---|---|---|
+| 默认 | 只有简历本体 | **投递给 HR**（不带改动说明等内部内容） |
+| `includeAppendix: true` | 附改动说明 / 待补充清单 / 校验结果 | 自己留档、复盘 |
+
+**安全边界**：不覆盖已存在的文件、不自动创建目录、拒绝目录路径——
+避免误毁你已有的简历文件。三类边界都有测试覆盖。
 | 多版本管理 | 计划中 | 每个 JD 一版 |
 
 ## 反虚构：从"提示词约束"到"代码校验"
@@ -263,25 +287,30 @@ DSH 会话模型 ──识别求职意图──▶ 调用 rewrite_resume 工具
 
 ```bash
 npm install          # 仅装 devDependencies
-npm run verify       # 全量验证：语法 + 类型 + 文档检查 + 发布审计 + 守卫行为 + 120 项测试 + 示例
+npm run verify       # 全量验证：语法 + 类型 + 文档检查 + 发布审计 + 守卫行为 + 172 项测试 + 示例
 ```
 
 | 命令 | 内容 | 需要 DSH |
 |---|---|---|
 | `npm run lint` | 语法检查 | 否 |
 | `npm run typecheck` | TypeScript 静态类型检查（JSDoc + checkJs） | 否 |
-| `npm test` | 120 项测试，node:test 标准 runner | 否 |
+| `npm test` | 172 项测试，node:test 标准 runner | 否 |
 | `npm run test:coverage` | 覆盖率报告 | 否 |
 | `npm run check:guard` | **守卫行为验证**（编造必须被拦、合法必须放行） | 否 |
 | `npm run check:docs` | 文档一致性检查 | 否 |
 | `npm run check:secrets` | 敏感信息扫描 | 否 |
+| `npm run demo:guard` | 只看守卫拦住编造的过程 | 否 |
+| `npm run demo:export` | **端到端：校验 → 导出真实 .docx** | 否 |
 | `npm run example` | 可运行示例（含守卫演示） | 否 |
 | `npm run verify` | 以上全部 | 否 |
 
-测试分五组（`test/node/`）：
+测试分七组（`test/node/`）：
 
 - `guard.test.js` — **反虚构守卫**：token 提取、反向验证（编造必须被抓住）、
-  正向路径（合法改写必须放行）、防误报、已知局限声明
+  正向路径（合法改写必须放行）、职责升格、时间线一致性、关键词回验、
+  整条新增检测、防误报、已知局限声明
+- `export.test.js` — **导出**：ZIP/DOCX 结构真实性（真实解包校验）、
+  XML 转义、Markdown 解析、安全边界（不覆盖已有文件等）
 - `core.test.js` — 语言规范化、输出契约、真实场景、失败路径
 - `contract.test.js` — 工具定义形态、schema 关键字白名单、真实 execute
 - `plugin.test.js` — `apply(ctx)` 装载路径、架构硬约束守卫
@@ -294,13 +323,18 @@ CI 在 Linux / Windows / macOS × Node 20 / 22 / 24 共 9 个组合上重跑同�
 
 ```
 src/guard.js    反虚构守卫：确定性校验（零依赖纯函数，可离线测试）
+src/export.js   导出：手写 ZIP + OOXML，零依赖生成 .docx
 src/core.js     零依赖核心：业务逻辑 + 契约常量（唯一事实来源）
-src/index.js    平台装配：section 注入 + 工具注册（零平台依赖）
+src/index.js    平台装配：section 注入 + 工具注册 + 文件 IO
 src/prompt.js   核心资产：简历改写引擎 prompt（含版本号）
 test/node/      测试套件
 examples/       可运行示例与 fixtures
-scripts/        验证工具（文档一致性 / 发布审计 / 守卫行为 / 测试运行器）
+scripts/        验证工具（文档一致性 / 发布审计 / 守卫行为 / 演示 / 测试运行器）
 ```
+
+**分层原则**：`core.js` 与 `guard.js`、`export.js` 全部是**零 IO 纯函数**，
+因此可在任何环境离线测试；文件系统写入只出现在 `index.js`（装配层）。
+这样契约层永远可测，IO 边界清晰。
 
 ### 两条不容违反的硬约束
 

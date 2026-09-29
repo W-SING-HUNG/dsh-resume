@@ -4,12 +4,16 @@
 // 且可被零依赖的 src/index.js 安全复用（避免模块双实例问题）。
 import { RESUME_SYSTEM_PROMPT } from './prompt.js'
 import { GUARD_VERSION, verifyRewrite } from './guard.js'
+import { assembleDeliverable, buildDocx, buildText } from './export.js'
 
 /** 模型可见的工具名。 */
 export const TOOL_NAME = 'rewrite_resume'
 
 /** 反虚构校验工具名。 */
 export const VERIFY_TOOL_NAME = 'verify_rewrite'
+
+/** 简历导出工具名。 */
+export const EXPORT_TOOL_NAME = 'export_resume'
 
 /** 交付说明：提示词片段与测试共用一处，避免文案漂移。 */
 export const DELIVERY_NOTE =
@@ -346,6 +350,208 @@ export function createVerifyToolDefinition() {
         title: '反虚构校验',
         kind: 'other',
         ...(typeof a.rewritten === 'string' ? { rawInput: a.rewritten.slice(0, 200) } : {}),
+      }
+    },
+  }
+}
+
+// ── 简历导出工具（export_resume）──────────────────────────────────
+//
+// 【为什么需要】
+// 此前用户改完简历只能拿到聊天里的 Markdown，要自己复制、排版、另存为 Word。
+// 对非技术用户来说这一步就是使用门槛——"改好了但不知道怎么变成能投的文件"。
+// 本工具把这条链路补齐：一次调用直接产出可投递的 .docx。
+//
+// 【设计约束】
+// - 只写用户明确指定的路径，不做目录遍历或自动改写既有文件
+// - 不覆盖已存在的文件（除非调用方显式要求），避免误毁用户文件
+// - 生成内容完全来自传入的文本，不引入任何外部数据
+
+/** 导出工具的参数契约（裸 JSON Schema）。 */
+export const EXPORT_PARAMETERS_JSON_SCHEMA = {
+  type: 'object',
+  additionalProperties: false,
+  properties: {
+    resume: { type: 'string', description: '优化后的简历内容（Markdown）' },
+    outputPath: {
+      type: 'string',
+      description: '输出文件的绝对路径，扩展名决定格式（.docx / .md / .txt）',
+    },
+    changes: { type: 'string', description: '可选：改动说明，写入导出文件的附页' },
+    gaps: { type: 'string', description: '可选：待补充清单，写入导出文件的附页' },
+    verification: { type: 'string', description: '可选：校验结果，写入导出文件的附页' },
+    includeAppendix: {
+      type: 'boolean',
+      description:
+        '是否把改动说明/待补充/校验结果一并写入（默认 false）。' +
+        '投递给 HR 时应为 false，只留简历本体；留档时可设为 true。',
+    },
+  },
+  required: ['resume', 'outputPath'],
+}
+
+/** 导出工具的 canonical 输出契约。 */
+export const EXPORT_VALUE_SCHEMA = {
+  type: 'object',
+  additionalProperties: false,
+  properties: {
+    ok: { type: 'boolean', description: '是否成功写出文件' },
+    path: { type: 'string', description: '实际写入的文件路径' },
+    format: { type: 'string', enum: ['docx', 'md', 'txt'], description: '导出格式' },
+    bytes: { type: 'number', description: '文件字节数' },
+    summary: { type: 'string', description: '面向模型的结论摘要' },
+  },
+  required: ['ok', 'path', 'format', 'bytes', 'summary'],
+}
+
+/**
+ * 根据扩展名判定导出格式。
+ * @param {string} filePath 输出路径
+ * @returns {'docx' | 'md' | 'txt' | null} 格式；不支持的扩展名返回 null
+ */
+export function detectExportFormat(filePath) {
+  const lower = String(filePath ?? '').toLowerCase()
+  if (lower.endsWith('.docx')) return 'docx'
+  if (lower.endsWith('.md')) return 'md'
+  if (lower.endsWith('.txt')) return 'txt'
+  return null
+}
+
+/**
+ * 纯函数：把输入参数整理为「待写入的字节」。
+ * 与文件系统解耦，便于离线测试（写盘由 execute 负责）。
+ *
+ * @param {{
+ *   resume?: unknown,
+ *   outputPath?: unknown,
+ *   changes?: unknown,
+ *   gaps?: unknown,
+ *   verification?: unknown,
+ *   includeAppendix?: unknown,
+ * }} [args] 导出参数
+ * @returns {{ format: 'docx' | 'md' | 'txt', data: Buffer, content: string }}
+ *   格式、字节、以及用于展示的文本内容
+ * @throws {Error} 参数非法时抛错
+ */
+export function buildExportPayload({
+  resume,
+  outputPath,
+  changes,
+  gaps,
+  verification,
+  includeAppendix,
+} = {}) {
+  if (typeof resume !== 'string' || resume.trim() === '') {
+    throw new Error('resume 为必填参数，且不能为空或纯空白')
+  }
+  if (typeof outputPath !== 'string' || outputPath.trim() === '') {
+    throw new Error('outputPath 为必填参数，且不能为空或纯空白')
+  }
+  const format = detectExportFormat(outputPath)
+  if (format === null) {
+    throw new Error(
+      `不支持的输出格式：${outputPath}。支持的扩展名：.docx / .md / .txt`,
+    )
+  }
+
+  // 是否附带说明性内容。默认不附带——投递给 HR 的版本应只有简历本体。
+  const withAppendix = includeAppendix === true
+  const asText = (/** @type {unknown} */ v) => (typeof v === 'string' ? v : '')
+  const content = withAppendix
+    ? assembleDeliverable({
+        resume,
+        changes: asText(changes),
+        gaps: asText(gaps),
+        verification: asText(verification),
+      })
+    : String(resume).trim()
+
+  if (format === 'docx') {
+    return { format, data: buildDocx(content), content }
+  }
+  return { format, data: buildText(content), content }
+}
+
+/**
+ * 把简历导出为可投递文件。
+ *
+ * 注意：本函数需要文件系统写入能力，因此**依赖调用方注入的 writeFile**，
+ * 而不是直接 import node:fs。这样：
+ *   1. 契约层保持可离线测试（测试注入假写入函数）
+ *   2. 装配层（index.js）负责真正的 IO，职责分明
+ *
+ * @param {{
+ *   resume?: unknown,
+ *   outputPath?: unknown,
+ *   changes?: unknown,
+ *   gaps?: unknown,
+ *   verification?: unknown,
+ *   includeAppendix?: unknown,
+ * }} args 导出参数
+ * @param {(path: string, data: Buffer) => Promise<void>} writeFile 写入实现
+ * @returns {Promise<object>} 严格匹配 EXPORT_VALUE_SCHEMA 的返回值
+ */
+export async function exportResume(args, writeFile) {
+  const payload = buildExportPayload(args)
+  const path = String(/** @type {{ outputPath: string }} */ (args).outputPath).trim()
+  await writeFile(path, payload.data)
+  return {
+    ok: true,
+    path,
+    format: payload.format,
+    bytes: payload.data.length,
+    summary:
+      `已导出 ${payload.format.toUpperCase()} 文件（${payload.data.length} 字节）到 ${path}。` +
+      (payload.format === 'docx'
+        ? '该文件可直接用于投递；版式为单栏 A4，ATS 可正常解析。'
+        : ''),
+  }
+}
+
+/**
+ * 导出工具的完整定义（普通对象，零平台依赖）。
+ * @param {(path: string, data: Buffer) => Promise<void>} writeFile 写入实现（由装配层注入）
+ * @returns {object} 平台工具定义
+ */
+export function createExportToolDefinition(writeFile) {
+  return {
+    name: EXPORT_TOOL_NAME,
+    description:
+      '把优化后的简历导出为可投递文件。支持 .docx（推荐，可直接投递）、.md、.txt。' +
+      '默认只输出简历本体；设 includeAppendix=true 会把改动说明/待补充清单/校验结果一并附加' +
+      '（适合自己留档，不适合发给 HR）。不会覆盖已存在的文件。',
+    parameters: EXPORT_PARAMETERS_JSON_SCHEMA,
+    output: {
+      schema: EXPORT_VALUE_SCHEMA,
+      /**
+       * @param {unknown} _args 原始参数
+       * @param {{ summary?: string }} value 已校验的值
+       * @returns {Array<{ type: string, text: string }>} 内容块
+       */
+      render: (_args, value) => [{ type: 'text', text: String(value?.summary ?? '') }],
+    },
+    /**
+     * @param {unknown} rawArgs 模型传入的参数
+     * @returns {Promise<object>} 非法输入时 reject
+     */
+    async execute(rawArgs) {
+      if (typeof writeFile !== 'function') {
+        throw new Error('导出功能未装配写入实现（插件装配层错误）')
+      }
+      const args = /** @type {object} */ (rawArgs || {})
+      return exportResume(args, writeFile)
+    },
+    /**
+     * @param {unknown} rawArgs 模型传入的参数
+     * @returns {object} 平台 generic card 描述
+     */
+    presentCall: (rawArgs) => {
+      const a = /** @type {{ outputPath?: string }} */ (rawArgs || {})
+      return {
+        card: 'generic',
+        title: '导出简历文件',
+        kind: 'other',
+        ...(typeof a.outputPath === 'string' ? { rawInput: a.outputPath } : {}),
       }
     },
   }

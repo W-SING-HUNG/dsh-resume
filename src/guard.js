@@ -373,6 +373,35 @@ export function verifyKeywordCoverage(rewritten, claimedKeywords) {
 }
 
 /**
+ * 结构性信息行的特征：姓名、求职意向、联系方式等简历头部内容。
+ *
+ * 【为什么需要排除（真实产品缺陷）】
+ * 实测发现：改写流程中补全简历头部（姓名、求职意向、联系方式）是
+ * **正常且必需**的操作——用户原文往往只有经历部分，头部由改写补上。
+ * 若不排除，这些行会被"整条新增检测"报为编造，导致守卫误报、
+ * 用户无法通过校验，反而用不了。
+ *
+ * 判据：以常见头部字段名开头（冒号前后皆可），或为纯联系方式行。
+ * 只作用于"整条新增检测"，数字/机构等其它检查仍全量生效——
+ * 头部里的电话真被改了，仍会被数字检查抓住。
+ */
+const STRUCTURAL_LINE_PATTERNS = [
+  /^(姓名|名字|求职意向|意向岗位|目标岗位|期望职位|联系方式|电话|手机|邮箱|email|e-?mail|地址|现居|所在地|个人网站|博客|github|linkedin|微信|政治面貌|籍贯|出生|年龄|性别)\s*[:：]/i,
+  // 纯联系方式行：邮箱或手机号单独成行
+  /^[\w.+-]+@[\w.-]+\.\w+$/,
+  /^1[3-9]\d{9}$/,
+]
+
+/**
+ * 判断一行是否属于简历结构性信息（头部），不参与"整条新增"判定。
+ * @param {string} line 已去除标记的行
+ * @returns {boolean} 是否属于结构性信息
+ */
+function isStructuralLine(line) {
+  return STRUCTURAL_LINE_PATTERNS.some((re) => re.test(line))
+}
+
+/**
  * 把文本切分为"内容单元"（bullet 行 / 短段落）。
  *
  * 用途：逐条比对改写结果与原文，发现**整条新增**的内容。
@@ -382,7 +411,7 @@ export function verifyKeywordCoverage(rewritten, claimedKeywords) {
  * 抓不住"凭空多出一条没做过的经历"。而后者是更严重的造假——
  * 面试官照着简历问"这个项目你负责哪部分"，候选人答不上来即穿。
  *
- * 切分规则：按行切，去掉 Markdown 标记与列表符号；
+ * 切分规则：按行切，去掉 Markdown 标记与列表符号，跳过结构性头部行；
  * 过短的行（标题、姓名等）不参与比对，避免误判。
  *
  * @param {string} text 待切分文本
@@ -401,6 +430,9 @@ export function extractContentUnits(text) {
       .replace(/\*\*/g, '')
       .trim()
     if (line === '') continue
+    // 结构性头部（姓名/求职意向/联系方式）不参与"整条新增"比对：
+    // 改写补全头部是正常操作，报为编造会造成误报
+    if (isStructuralLine(line)) continue
     // 过短的行多为标题/姓名（"张三"、"教育背景"、"技能"），不参与比对。
     //
     // 阈值取 8（实测校准）：初版取 12，结果把「参与了登录模块的重构。」
