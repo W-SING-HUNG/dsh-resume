@@ -138,7 +138,7 @@ const SCENARIOS = [
     label: '应届前端开发（技术对齐 + 缺项识别）',
     args: {
       jd: '岗位：前端开发工程师（校招/实习）\n职责：\n1. 负责核心 Web 产品业务组件开发与性能优化；\n2. 熟练掌握 Vue3 / TypeScript / Vite；\n3. 有大型项目性能优化经验者、熟悉 SSR (Nuxt) 优先。',
-      resume: '姓名：张三\n学校：某本科 计算机专业 (大三)\n技能：HTML, CSS, JavaScript, Vue2, React 基础\n项目经历：\n- 校园二手交易平台（前端负责人）\n  - 使用 Vue2 编写主要展示页面和商品列表；\n  - 对接后端接口，完成了登录与购物车功能；\n  - 页面首屏加载时间从 2.4s 缩短至 1.8s。',
+      resume: '姓名：示例候选人\n学校：某大学 计算机相关专业 (本科在读)\n技能：HTML, CSS, JavaScript, Vue2, React 基础\n项目经历：\n- 校园二手交易平台（前端负责人）\n  - 使用 Vue2 编写主要展示页面和商品列表；\n  - 对接后端接口，完成了登录与购物车功能；\n  - 页面首屏加载时间从 2.4s 缩短至 1.8s。',
     },
     lang: 'zh',
     markers: ['禁止编造', '待补充', 'ATS'],
@@ -148,7 +148,7 @@ const SCENARIOS = [
     label: '跨专业转型后端（项目单薄，严防编造）',
     args: {
       jd: '岗位：Golang 后端开发\n要求：\n1. 具备扎实数据结构基础，熟练使用 Go/Gin 进行 Web 开发；\n2. 熟练掌握 MySQL 索引优化与 Redis 缓存设计；\n3. 了解分布式系统与高并发架构。',
-      resume: '姓名：李四\n专业：自动化专业 (应届)\n技能：C/C++, Python 脚本, 自学 Go 语法与 Gin\n项目：\n- 简易博客系统 (个人练习)\n  - 用 Gin 写了增删改查接口；\n  - 用 GORM 连 MySQL 存储文章。',
+      resume: '姓名：示例候选人 A\n专业：自动化专业 (应届)\n技能：C/C++, Python 脚本, 自学 Go 语法与 Gin\n项目：\n- 简易博客系统 (个人练习)\n  - 用 Gin 写了增删改查接口；\n  - 用 GORM 连 MySQL 存储文章。',
     },
     lang: 'zh',
     markers: ['禁止编造', '待补充'],
@@ -158,7 +158,7 @@ const SCENARIOS = [
     label: '海外全栈实习（英文输出 + 量化保留）',
     args: {
       jd: 'Role: Full-Stack Software Engineer Intern\nRequirements:\n- Strong Node.js, Express, React, TypeScript skills.\n- Experience with RESTful APIs, Docker containerization.\n- Excellent communication skills.',
-      resume: 'Name: Alex Chen\nEducation: B.S. in Software Engineering (Junior)\nExperience:\n- E-commerce Platform Project\n  - Implemented Node.js / Express backend microservices.\n  - Reduced API response latency by 35%.\n  - Configured local environment.',
+      resume: 'Name: Sample Candidate\nEducation: B.S. in Software Engineering (Junior)\nExperience:\n- E-commerce Platform Project\n  - Implemented Node.js / Express backend microservices.\n  - Reduced API response latency by 35%.\n  - Configured local environment.',
       language: 'en',
     },
     lang: 'en',

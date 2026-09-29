@@ -103,7 +103,7 @@ jobs:
             console.log('✅ 反虚构铁律完整');
           "
 
-      - name: Secret scan
+      - name: Publish audit (credentials + internal content)
         run: npm run check:secrets
 
       - name: Placeholder audit

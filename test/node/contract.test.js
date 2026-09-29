@@ -179,7 +179,7 @@ describe('真实 execute 执行', () => {
       label: '英文：海外实习',
       args: {
         jd: 'Role: Full-Stack Intern\n- Node.js, Express, React, TypeScript\n- RESTful APIs, Docker',
-        resume: 'Name: Alex Chen\n- Node.js/Express microservices\n- Reduced API latency by 35%',
+        resume: 'Name: Sample Candidate\n- Node.js/Express microservices\n- Reduced API latency by 35%',
         language: 'en',
       },
       lang: 'en',
