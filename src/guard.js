@@ -791,17 +791,32 @@ export function verifyRewrite({ original, rewritten, claimedKeywords } = {}) {
   // 逐条比对职责动词强度。改写若把「参与」升格为「主导」，
   // 属于事实性夸大——面试官追问"你怎么主导的"时会立刻暴露。
   //
-  // 用 minLevel 而非 maxLevel 判定（理由见 extractResponsibilityLevel 说明）：
-  // 最低强度动词才代表真实参与程度。
+  // 【判据的设计（两轮实测才定对）】
+  // 简历里有两类升格，必须分别用两个方向去抓：
+  //
+  //   类型 A「弱表述被抬高」：原文「协助完成接口」→ 改写「负责接口」。
+  //     minLevel 从 2 升到 3。若只看 maxLevel 会漏报
+  //     （原文 max=3 因含"完成"，改写 max 也是 3）。
+  //
+  //   类型 B「新增更强主张」：原文「负责开发」→ 改写「主导开发」。
+  //     maxLevel 从 3 升到 4。若只看 minLevel 会漏报
+  //     （两边 min 都是 3）。
+  //
+  // 因此判据是 **minLevel 或 maxLevel 任一上升即报**。
+  // 但这会让"原文无任何职责动词、改写用『负责』规整表述"被误报，
+  // 故对原文 level 为 0 的情况设门槛：改写须达到主导层（4）才报。
   const originalResp = extractResponsibilityLevel(originalText)
   const rewrittenResp = extractResponsibilityLevel(rewrittenText)
-  if (
-    rewrittenResp.minLevel > 0 &&
-    originalResp.minLevel > 0 &&
-    rewrittenResp.minLevel > originalResp.minLevel
-  ) {
-    const from = RESPONSIBILITY_LEVELS.find((t) => t.level === originalResp.minLevel)
-    const to = RESPONSIBILITY_LEVELS.find((t) => t.level === rewrittenResp.minLevel)
+  const LEADERSHIP_LEVEL = 4
+  const isInflation =
+    originalResp.maxLevel === 0
+      ? rewrittenResp.maxLevel >= LEADERSHIP_LEVEL
+      : rewrittenResp.minLevel > originalResp.minLevel ||
+        rewrittenResp.maxLevel > originalResp.maxLevel
+
+  if (isInflation) {
+    const from = RESPONSIBILITY_LEVELS.find((t) => t.level === originalResp.maxLevel)
+    const to = RESPONSIBILITY_LEVELS.find((t) => t.level === rewrittenResp.maxLevel)
     const originalWeakest = originalResp.hits
       .filter((h) => h.level === originalResp.minLevel)
       .map((h) => h.word)
@@ -812,9 +827,12 @@ export function verifyRewrite({ original, rewritten, claimedKeywords } = {}) {
       code: 'RESPONSIBILITY_INFLATED',
       severity: 'error',
       message:
-        `职责描述被升格：原文最弱的表述是「${from?.label ?? '未知'}」` +
-        `（${originalWeakest.join('、')}），改写后变为「${to?.label ?? '未知'}」` +
-        `（${rewrittenWeakest.join('、')}）。` +
+        (originalResp.maxLevel === 0
+          ? `原文未主张任何职责强度，改写后却出现「${to?.label ?? '未知'}」表述` +
+            `（${rewrittenWeakest.join('、')}）。`
+          : `职责描述被升格：原文最强为「${from?.label ?? '未知'}」` +
+            `（最弱为「${originalWeakest.join('、')}」），改写后最强为` +
+            `「${to?.label ?? '未知'}」（最弱为「${rewrittenWeakest.join('、')}」）。`) +
         '职责强度必须与原文一致，不得把"协助"写成"负责"或把"参与"写成"主导"。',
       evidence: rewrittenWeakest,
     })

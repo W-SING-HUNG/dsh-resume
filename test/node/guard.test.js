@@ -204,13 +204,42 @@ describe('守卫：职责升格检测（比编数字更隐蔽的造假）', () =
   })
 
   test('协助 → 负责：必须判为升格（含补语干扰项）', () => {
-    // 关键回归用例：`协助完成` 同时含「协助」(2) 与「完成」(3)，
-    // 若按"全文最高层"判定会漏报，必须按"最低层"判定。
+    // 关键回归用例 1：`协助完成` 同时含「协助」(2) 与「完成」(3)，
+    // 若只看 maxLevel 会漏报，必须同时看 minLevel。
     const report = verifyRewrite({
       original: '协助完成接口对接。',
       rewritten: '负责接口对接。',
     })
     assert.equal(report.ok, false, '「协助完成」的真实强度是"协助"，不得被"完成"抬高层级')
+  })
+
+  test('负责 → 主导：必须判为升格（minLevel 未变的情形）', () => {
+    // 关键回归用例 2（真实漏报，由 README 演示脚本发现）：
+    // 原文含「负责」(3)，改写加了「主导」(4)。
+    // 两边 minLevel 都是 3，若只看 minLevel 会漏报，必须同时看 maxLevel。
+    const report = verifyRewrite({
+      original: '负责使用 Vue2 编写主要展示页面。',
+      rewritten: '主导使用 Vue2 编写主要展示页面。',
+    })
+    assert.equal(report.ok, false, '「负责」升格为「主导」必须被抓，不得因 minLevel 未变而放行')
+  })
+
+  test('原文无职责主张 → 改写声称主导：必须判为升格', () => {
+    const report = verifyRewrite({
+      original: '使用 Vue2 编写展示页面。',
+      rewritten: '主导使用 Vue2 编写展示页面。',
+    })
+    assert.equal(report.ok, false, '原文未主张领导权，改写不得凭空加上')
+  })
+
+  test('原文无职责主张 → 改写用"负责"规整表述：不得误报', () => {
+    // 这是简历中正常的表述规整（用户确实做了这件事），报出来是误报。
+    // 因此对"原文 level 为 0"的情况设了主导层（4）门槛。
+    const report = verifyRewrite({
+      original: '使用 Vue2 编写展示页面。',
+      rewritten: '负责使用 Vue2 完成展示页面的编写工作。',
+    })
+    assert.equal(report.ok, true, '把动作规整为"负责"属正常改写，不得误报')
   })
 
   test('同一强度的措辞强化：不得误报', () => {
@@ -229,12 +258,12 @@ describe('守卫：职责升格检测（比编数字更隐蔽的造假）', () =
     assert.equal(report.ok, true, '最弱动词仍是"参与/协助"，属同层压缩')
   })
 
-  test('原文无职责动词时不做判定（避免误报）', () => {
+  test('原文无职责动词时不做过度判定（避免误报）', () => {
     const report = verifyRewrite({
       original: '完成登录页面。',
       rewritten: '完成登录页面开发工作。',
     })
-    assert.equal(report.ok, true, '原文强度为 0 时不判定升格')
+    assert.equal(report.ok, true, '原文强度为 0 且改写未达主导层时不判定升格')
   })
 })
 
@@ -379,9 +408,10 @@ describe('守卫：整条新增检测（特征比对抓不住的造假）', () =
 
 describe('守卫：防误报（误报会让守卫被忽略，比漏报更糟）', () => {
   test('动词 + 机构后缀 不得被当成机构名', () => {
+    // 注意改写须保持同层职责动词，否则会触发职责升格（另一个检查项）
     const report = verifyRewrite({
       original: '负责公司官网前端开发，使用了 Vue2。',
-      rewritten: '主导公司官网前端开发，基于 Vue2 完成核心模块重构。',
+      rewritten: '负责公司官网前端开发工作，基于 Vue2 完成核心模块重构。',
     })
     assert.equal(
       report.ok,
