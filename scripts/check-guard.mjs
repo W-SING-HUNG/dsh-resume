@@ -68,6 +68,21 @@ const CASES = [
     expectOk: false,
   },
   {
+    // 特征比对抓不住：新条目不含新数字/新机构，靠逐条内容比对发现
+    name: '整条新增：凭空多出一条经历',
+    original: '- 使用 Vue2 完成商品列表模块开发；\n- 对接后端 REST 接口，完成登录功能；',
+    rewritten:
+      '- 使用 Vue2 完成商品列表模块开发；\n- 对接后端 REST 接口，完成登录功能；\n- 负责用户增长策略，主导社群运营体系搭建。',
+    expectOk: false,
+  },
+  {
+    name: '关键词虚报：声称覆盖但未写入',
+    original: '负责前端开发，使用 Vue2。',
+    rewritten: '负责前端开发，使用 Vue2。',
+    claimedKeywords: ['Vue2', 'TypeScript'],
+    expectOk: false,
+  },
+  {
     name: '合法改写：纯措辞强化（保持同层职责动词）',
     original: '负责前端开发，优化页面加载速度。',
     rewritten: '负责前端开发，通过重构关键渲染路径显著提升页面加载速度。',
@@ -117,6 +132,7 @@ for (const testCase of CASES) {
   const report = verifyRewrite({
     original: testCase.original,
     rewritten: testCase.rewritten,
+    claimedKeywords: testCase.claimedKeywords,
   })
   if (report.ok !== testCase.expectOk) {
     console.error(

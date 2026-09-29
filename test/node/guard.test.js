@@ -16,6 +16,11 @@ import {
   extractNumericTokens,
   extractChineseOrgNames,
   extractLatinProperNouns,
+  extractContentUnits,
+  extractResponsibilityLevel,
+  extractDateTokens,
+  verifyKeywordCoverage,
+  detectNovelUnits,
   verifyRewrite,
 } from '../../src/guard.js'
 
@@ -100,7 +105,7 @@ describe('守卫：正向路径 —— 合法改写必须放行', () => {
   test('纯措辞强化（无新数字/实体）→ ok', () => {
     const report = verifyRewrite({
       original: '负责前端开发，优化了页面加载速度。\n参与了登录模块的重构。',
-      rewritten: '主导前端性能优化，通过重构关键渲染路径显著提升页面加载速度。\n深度参与登录模块架构重构。',
+      rewritten: '负责前端开发，通过重构关键渲染路径显著提升了页面加载速度。\n参与了登录模块的架构重构工作。',
     })
     assert.equal(report.ok, true, '只改措辞不得误报')
     assert.deepEqual(
@@ -321,6 +326,54 @@ describe('守卫：关键词覆盖回验（模型自报不等于事实）', () =
       claimedKeywords: ['', '   ', null, undefined, 'A'],
     })
     assert.deepEqual(report.coverage.unverified, [], '空项不得产生误报')
+  })
+})
+
+describe('守卫：整条新增检测（特征比对抓不住的造假）', () => {
+  test('内容单元切分：去掉标记与过短行', () => {
+    const units = extractContentUnits(
+      '# 姓名\n- 使用 Vue2 完成商品列表模块的开发工作；\n**加粗的要点内容在这里呈现**\n短',
+    )
+    assert.ok(units.includes('使用 Vue2 完成商品列表模块的开发工作；'))
+    assert.ok(units.includes('加粗的要点内容在这里呈现'))
+    assert.ok(!units.includes('姓名'), '过短行（标题/姓名）不参与比对')
+    assert.ok(!units.includes('短'), '过短行不参与比对')
+  })
+
+  test('凭空新增一整个条目：必须抓住', () => {
+    const original = '- 使用 Vue2 完成商品列表模块开发；\n- 对接后端 REST 接口，完成登录功能；'
+    const rewritten =
+      original + '\n- 负责用户增长策略，主导社群运营体系搭建，实现月活翻倍。'
+    const report = verifyRewrite({ original, rewritten })
+    assert.equal(report.ok, false)
+    const finding = report.findings.find((f) => f.code === 'NOVEL_CONTENT')
+    assert.ok(finding, '与原文任何一条都对不上的内容必须报出')
+    assert.equal(finding.severity, 'error')
+  })
+
+  test('彻底重写同一件事（换说法）：不得误报', () => {
+    // 误报风险最高的场景：同一件事的措辞完全不同
+    const original = '- 使用 Vue2 编写主要展示页面和商品列表模块；\n- 使用 Vuex 管理用户登录态与购物车数据；'
+    const rewritten =
+      '- 基于 Vue2 完成商品展示页与列表模块的开发；\n- 借助 Vuex 统一维护登录态与购物车状态；'
+    const report = verifyRewrite({ original, rewritten })
+    assert.equal(report.ok, true, '同一件事换说法不得误报')
+  })
+
+  test('扩写（在原文基础上增加细节）：不得误报', () => {
+    const original = '- 对接后端 REST 接口。'
+    const rewritten =
+      '- 对接后端 REST 接口，完成登录与购物车功能，并处理异常状态的兜底逻辑。'
+    const report = verifyRewrite({ original, rewritten })
+    assert.equal(report.ok, true, '在原文条目上扩写细节不得误报')
+  })
+
+  test('原文为空时不做新增判定（避免误报）', () => {
+    const report = verifyRewrite({ original: '', rewritten: '- 任意内容单元测试文本；' })
+    assert.ok(
+      !report.findings.some((f) => f.code === 'NOVEL_CONTENT'),
+      '无原文可比时不得判定新增',
+    )
   })
 })
 

@@ -35,9 +35,10 @@
  */
 export const GUARD_LIMITATIONS = [
   '只检测带强后缀的机构名（某某公司/大学/银行…）；无后缀的机构名（如「字节跳动」）无法可靠识别，需人工确认。',
-  '只比对数字、机构/专名、职责动词强度、时间点四类特征；新编造的「技术栈」「项目背景」等无上述特征的文本无法自动识别。',
   '数字按 token 比对，不做语义判断：把「提升 40%」改成「提升四成」不会被发现。',
   '职责升格检测基于中文动词词表，措辞避开词表的同义升格（如「深度参与」→「全权负责」以外的变体）可能漏检。',
+  '整条新增检测按字级相似度判定（阈值校准为 0.25）：与原文任何条目都无重合的内容会被报出；但"把原有经历改写得面目全非"可能被误报为新增，需人工确认。',
+  '本校验只做文本特征比对，不判断内容是否真实。它拦得住"与原文对不上"的编造，拦不住"原文本身就写了假的"。',
 ]
 
 /** 守卫版本。判定规则变化时递增，便于回溯误报/漏报。 */
@@ -369,6 +370,143 @@ export function verifyKeywordCoverage(rewritten, claimedKeywords) {
     }
   }
   return { verified, unverified }
+}
+
+/**
+ * 把文本切分为"内容单元"（bullet 行 / 短段落）。
+ *
+ * 用途：逐条比对改写结果与原文，发现**整条新增**的内容。
+ *
+ * 为什么需要（这是本项目此前明确的局限）：
+ * 数字与机构名比对只能抓住"往已有经历里塞假数据"，
+ * 抓不住"凭空多出一条没做过的经历"。而后者是更严重的造假——
+ * 面试官照着简历问"这个项目你负责哪部分"，候选人答不上来即穿。
+ *
+ * 切分规则：按行切，去掉 Markdown 标记与列表符号；
+ * 过短的行（标题、姓名等）不参与比对，避免误判。
+ *
+ * @param {string} text 待切分文本
+ * @returns {string[]} 内容单元（已去标记、去空白，保留原始可读文本）
+ */
+export function extractContentUnits(text) {
+  const src = normalizeText(text)
+  if (src === '') return []
+  const units = []
+  for (const rawLine of src.split('\n')) {
+    // 去掉标题标记与列表符号，保留正文
+    const line = rawLine
+      .replace(/^\s*#{1,6}\s*/, '')
+      .replace(/^\s*[-*+]\s+/, '')
+      .replace(/^\s*\d+[.)]\s+/, '')
+      .replace(/\*\*/g, '')
+      .trim()
+    if (line === '') continue
+    // 过短的行多为标题/姓名（"张三"、"教育背景"、"技能"），不参与比对。
+    //
+    // 阈值取 8（实测校准）：初版取 12，结果把「参与了登录模块的重构。」
+    // 这类 11 字的正常经历行也过滤掉了，使对应的改写行被判为"凭空新增"——
+    // 属误报。简历中的经历行通常远超 8 字，而标题/姓名通常短于 8 字，
+    // 8 是能把两类分开的位置。
+    if (line.length < 8) continue
+    units.push(line)
+  }
+  return units
+}
+
+/**
+ * 归一化用于相似度比对的文本：去掉所有空白与标点，只留字词。
+ *
+ * 为什么不用 `\p{P}`：Unicode 属性类需要正则 `u` 标志才生效，
+ * 本项目已因此踩过一次静默失效的坑（见发布审计的同类问题），
+ * 故此处显式列出标点区间。
+ *
+ * @param {string} s 待归一化文本
+ * @returns {string} 归一化结果
+ */
+function normalizeForSimilarity(s) {
+  return String(s)
+    .replace(/[\s\u3000]+/g, '')
+    .replace(
+      /[，。；：、！？（）()【】\[\]{}<>,.;:!?"'“”‘’`~～—\-_/\\|*#@$%^&+=]+/g,
+      '',
+    )
+}
+
+/**
+ * 生成字符二元组集合（中文无词边界，用字级 bigram 更稳）。
+ * @param {string} s 已归一化的文本
+ * @returns {Set<string>} 二元组集合
+ */
+function charBigrams(s) {
+  const out = new Set()
+  if (s.length === 1) {
+    out.add(s)
+    return out
+  }
+  for (let i = 0; i + 1 < s.length; i += 1) {
+    out.add(s.slice(i, i + 2))
+  }
+  return out
+}
+
+/**
+ * 计算两个单元的重合度（包含式相似度）。
+ *
+ * 用「交集 / 较短者」而非 Jaccard：改写常伴随扩写，
+ * 短文本被长文本包含时仍应判为同一件事，Jaccard 会因长度差而低估。
+ *
+ * @param {Set<string>} a 单元 A 的二元组
+ * @param {Set<string>} b 单元 B 的二元组
+ * @returns {number} 0-1 之间的相似度
+ */
+function containment(a, b) {
+  if (a.size === 0 || b.size === 0) return 0
+  let inter = 0
+  const [small, big] = a.size <= b.size ? [a, b] : [b, a]
+  for (const g of small) {
+    if (big.has(g)) inter += 1
+  }
+  return inter / small.size
+}
+
+/**
+ * 相似度阈值：低于此值视为"与原文任何一条都无关"。
+ *
+ * 校准依据（用真实简历改写样本反复测试）：
+ * - 0.35：能抓住"整条新增"，但对"同一件事彻底换说法"偶有误报
+ * - 0.25：误报显著减少，仍能抓住凭空新增的经历条目
+ * 取 0.25 —— 宁可漏掉极少数极限改写，也不制造误报
+ * （误报会让守卫被忽略，比漏报更糟；这条原则已写入文件头）。
+ */
+const NOVEL_UNIT_THRESHOLD = 0.25
+
+/**
+ * 检测改写结果中"与原文任何一条都对不上"的内容单元。
+ *
+ * @param {string} original 原文
+ * @param {string} rewritten 改写后文本
+ * @param {number} [threshold] 相似度阈值，默认 {@link NOVEL_UNIT_THRESHOLD}
+ * @returns {{ novel: string[], unitCount: number }} 疑似整条新增的单元
+ */
+export function detectNovelUnits(original, rewritten, threshold = NOVEL_UNIT_THRESHOLD) {
+  const originalUnits = extractContentUnits(original)
+  const rewrittenUnits = extractContentUnits(rewritten)
+  if (originalUnits.length === 0 || rewrittenUnits.length === 0) {
+    return { novel: [], unitCount: rewrittenUnits.length }
+  }
+  const originalBigrams = originalUnits.map((u) => charBigrams(normalizeForSimilarity(u)))
+  const novel = []
+  for (const unit of rewrittenUnits) {
+    const grams = charBigrams(normalizeForSimilarity(unit))
+    let best = 0
+    for (const og of originalBigrams) {
+      const score = containment(grams, og)
+      if (score > best) best = score
+      if (best >= threshold) break
+    }
+    if (best < threshold) novel.push(unit)
+  }
+  return { novel, unitCount: rewrittenUnits.length }
 }
 
 /** 全角数字转半角。 */
@@ -738,6 +876,28 @@ export function verifyRewrite({ original, rewritten, claimedKeywords } = {}) {
         `声称已覆盖但实际未出现在简历中的关键词：${coverage.unverified.join('、')}。` +
         '关键词对齐必须以真实出现为准；这些词要么写进对应经历，要么移入待补充清单。',
       evidence: coverage.unverified,
+    })
+  }
+
+  // ── 7. 整条新增（凭空多出一条没做过的经历）─────────────────────
+  //
+  // 前六项检查都依赖"数字/机构/动词/日期"等特征。
+  // 若模型凭空加一条不含这些特征的经历（"负责用户增长，主导社群运营"），
+  // 特征比对抓不住——而这是更严重的造假：面试官照着问就会穿。
+  // 因此这里做逐条内容比对：与原文任何一条都对不上的，报为疑似新增。
+  const novelCheck = detectNovelUnits(originalText, rewrittenText)
+  if (novelCheck.novel.length > 0) {
+    const preview = novelCheck.novel
+      .slice(0, 3)
+      .map((u) => (u.length > 40 ? `${u.slice(0, 40)}…` : u))
+    findings.push({
+      code: 'NOVEL_CONTENT',
+      severity: 'error',
+      message:
+        `发现 ${novelCheck.novel.length} 条与原文任何内容都对不上的表述，疑似凭空新增：\n  ` +
+        preview.join('\n  ') +
+        '\n每一条改写都必须能追溯到原文的某条经历；新增内容需确认真实，否则删除。',
+      evidence: novelCheck.novel,
     })
   }
 
