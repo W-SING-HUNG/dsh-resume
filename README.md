@@ -148,14 +148,14 @@ DSH 会话模型 ──识别求职意图──▶ 调用 rewrite_resume 工具
 
 ```bash
 npm install          # 仅装 devDependencies
-npm run verify       # 全量验证：语法 + 类型 + 文档检查 + 92 项测试 + 示例
+npm run verify       # 全量验证：语法 + 类型 + 文档检查 + 96 项测试 + 示例
 ```
 
 | 命令 | 内容 | 需要 DSH |
 |---|---|---|
 | `npm run lint` | 语法检查 | 否 |
 | `npm run typecheck` | TypeScript 静态类型检查（JSDoc + checkJs） | 否 |
-| `npm test` | 92 项测试，node:test 标准 runner | 否 |
+| `npm test` | 96 项测试，node:test 标准 runner | 否 |
 | `npm run test:coverage` | 覆盖率报告 | 否 |
 | `npm run check:docs` | 文档一致性检查 | 否 |
 | `npm run check:secrets` | 敏感信息扫描 | 否 |
@@ -170,6 +170,7 @@ npm run verify       # 全量验证：语法 + 类型 + 文档检查 + 92 项测
 - `contract.test.js` — 工具定义形态、schema 关键字白名单、真实 execute
 - `plugin.test.js` — `apply(ctx)` 装载路径、架构硬约束守卫
 - `schema.test.js` — 调用平台自身的断言函数校验 schema（探测不到 DSH 时优雅跳过）
+- `publish-audit.test.js` — 发布审计元测试：内部资料名单与 `.gitignore` 必须双向一致（防边界被削弱）
 
 CI 在 Linux / Windows / macOS × Node 20 / 22 / 24 共 9 个组合上重跑同一套命令。
 

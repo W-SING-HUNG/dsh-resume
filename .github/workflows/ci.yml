@@ -43,14 +43,14 @@ jobs:
         run: npm run typecheck
 
       # 文档一致性：文档里引用的路径与 npm script 必须真实存在。
-      # 第九轮迁移测试结构时曾留下 17 处失效引用，此检查防复发。
+      # 测试结构调整时曾留下大量失效引用，此检查防复发。
       - name: Docs consistency
         run: npm run check:docs
 
       # 覆盖四组测试：业务铁律 / 契约 / 装载路径 / 真机 schema 校验。
       # schema 组需要本机 DSH 安装，CI 上找不到时优雅跳过（exit 0），
       # 但仍执行以验证"跳过路径"本身不崩。
-      - name: Test suite (92 checks)
+      - name: Test suite
         run: npm test
 
       - name: Coverage report

@@ -145,7 +145,7 @@ test: 补 resume 为空的边界用例
 
 ## 提交前检查清单
 
-- [ ] `npm run verify` 全绿（语法 + 类型 + 92 项测试 + 示例）
+- [ ] `npm run verify` 全绿（语法 + 类型 + 96 项测试 + 示例）
 - [ ] 未引入任何 `import '@deepseek-ai/*'`
 - [ ] `package.json` 的 `dependencies` 仍为空
 - [ ] 新增 schema 已通过 `test/node/schema.test.js`（真机校验）

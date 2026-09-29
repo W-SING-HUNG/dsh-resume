@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // 文档-代码一致性自检（docs consistency linter）
 //
-// 存在理由：第九轮迁移测试结构时留下 17 处指向已删除文件的失效引用。
+// 存在理由：测试结构迁移时曾留下 17 处指向已删除文件的失效引用。
 // 靠人记住同步不可靠，因此把"文档里提到的仓库路径必须存在"变成可执行检查。
 //
 // 设计原则：宁可漏报，不可误报。乱叫的 linter 会被忽略，等于没有。
@@ -17,6 +17,7 @@
 // 运行：npm run check:docs
 
 import { readFileSync, existsSync, readdirSync, statSync } from 'node:fs'
+import { execFileSync } from 'node:child_process'
 import { basename, dirname, join, relative, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
@@ -46,45 +47,55 @@ const EXTERNAL_PREFIXES = [
 const SKIP_DIRS = new Set(['node_modules', '.git', 'coverage', '.pnpm-store'])
 
 /**
- * 内部资料目录/文件（不对外发布，见 .gitignore）。
- * 这些文件里的引用不需要检查——它们不进入公开仓库。
- * 不排除它们会产生误报，而误报会让检查失去意义。
+ * 公开文件集合：由 git 决定，而不是在本脚本里硬编码名单。
+ *
+ * 为什么：本脚本是公开文件，若在此列出"哪些文件是内部资料"，等于把
+ * 内部文档清单公布出去。改用 `git ls-files` 后有两个好处：
+ *   1. 边界由版本控制本身定义，永远与"实际会发布什么"一致
+ *   2. 脚本里不含任何内部文件名，公开读代码也不会得知内部结构
+ * 未跟踪的文件（本地开发记录）自然被排除，其引用无需检查。
  */
-const INTERNAL_PREFIXES = [
-  'AGENTS.md',
-  'workflow.md',
-  'docs/',
-]
+const TRACKED = new Set(
+  execFileSync('git', ['ls-files'], { encoding: 'utf8', cwd: ROOT })
+    .split('\n')
+    .map((l) => l.trim().replace(/\\/g, '/'))
+    .filter((l) => l.length > 0),
+)
 
-/** 判断文件是否属于内部资料。 */
-function isInternal(relPath) {
-  const p = relPath.replace(/\\/g, '/')
-  return INTERNAL_PREFIXES.some((prefix) => p === prefix || p.startsWith(prefix))
+/** 判断文件是否属于公开范围。 */
+function isPublic(relPath) {
+  return TRACKED.has(relPath.replace(/\\/g, '/'))
 }
 
-/** 递归收集待检查文件（跳过内部资料）。 */
+/** 递归收集待检查文件（只检查公开文件）。 */
 function collectFiles(dir, acc = [], base = ROOT) {
   for (const entry of readdirSync(dir)) {
     if (SKIP_DIRS.has(entry)) continue
     const full = join(dir, entry)
     const rel = relative(base, full)
-    if (isInternal(rel)) continue
-    if (statSync(full).isDirectory()) collectFiles(full, acc, base)
-    else if (/\.(md|yml|yaml)$/.test(entry)) acc.push(full)
+    if (statSync(full).isDirectory()) {
+      collectFiles(full, acc, base)
+      continue
+    }
+    if (!isPublic(rel)) continue
+    if (/\.(md|yml|yaml)$/.test(entry)) acc.push(full)
   }
   return acc
 }
 
-/** 全仓 basename → 路径集合，用于解析裸文件名引用（跳过内部资料）。 */
+/** 全仓 basename → 路径集合，用于解析裸文件名引用（只看公开文件）。 */
 function buildBasenameIndex() {
   const index = new Map()
   const walk = (dir) => {
     for (const entry of readdirSync(dir)) {
       if (SKIP_DIRS.has(entry)) continue
       const full = join(dir, entry)
-      if (isInternal(relative(ROOT, full))) continue
-      if (statSync(full).isDirectory()) walk(full)
-      else if (!index.has(entry)) index.set(entry, full)
+      if (statSync(full).isDirectory()) {
+        walk(full)
+        continue
+      }
+      if (!isPublic(relative(ROOT, full))) continue
+      if (!index.has(entry)) index.set(entry, full)
     }
   }
   walk(ROOT)
