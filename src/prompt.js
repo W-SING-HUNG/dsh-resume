@@ -2,14 +2,18 @@
 //
 // 设计原则：只基于事实重排和强化，绝不虚构经历（虚构 = 求职者面试翻车 = 差评）
 //
-// ┌─ PROMPT 版本：1.0.0 ────────────────────────────────────────────────────┐
+// ┌─ PROMPT 版本：1.1.0 ────────────────────────────────────────────────────┐
 // │ 改动本文件时必须同步更新此版本号，并在 CHANGELOG.md 说明理由。          │
 // │ 三项铁律（只用真实信息 / 保留量化数据 / 缺项进待补充清单）不可削弱，    │
-// │ 已由 test/run-test.js 与 CI 的 guard 任务物理锁定。                     │
+// │ 已由测试与 CI 的 guard 任务物理锁定。                                   │
+// │                                                                        │
+// │ v1.1.0：新增「改写后必须调用 verify_rewrite 校验」的强制闭环。          │
+// │ 原因：铁律此前只是提示词约束，模型可违反且无从发现；                    │
+// │ 现由确定性代码做二次校验，形成"改写 → 校验 → 修正 → 再校验"的闭环。     │
 // └────────────────────────────────────────────────────────────────────────┘
 
 /** 当前 prompt 版本。任何措辞改动都应递增，便于回溯输出质量变化。 */
-export const PROMPT_VERSION = '1.0.0'
+export const PROMPT_VERSION = '1.1.0'
 
 /** 支持的语言，与工具参数 schema 的 enum 保持一致。 */
 export const SUPPORTED_LANGUAGES = /** @type {const} */ (['zh', 'en'])
@@ -35,10 +39,21 @@ export function RESUME_SYSTEM_PROMPT(language = "zh") {
 4. 关键词对齐：把 JD 中的核心术语自然融入对应经历的描述中（如 JD 要求"分布式系统"，相关经历就显式写出该词），提升 ATS 筛选命中率。
 5. 技能清单：按 JD 要求重排技能优先级。
 
+【强制校验闭环】（必做，不可跳过）
+铁律不能只靠自觉。改写完成后，你必须调用 verify_rewrite 工具做确定性校验：
+  verify_rewrite(original = 简历原文, rewritten = 你改写后的简历全文)
+- 若返回 ok=false：说明改写引入了原文不存在的数字或机构名。
+  你必须**修正后重新校验**，直到 ok=true 才能交付。修正原则是删除或改写
+  那些编造内容，绝不允许"保留但说明"。
+- 若返回 ok=true 但有提醒（原文数据在改写后丢失）：评估是否为有意压缩；
+  若不是，补回真实数据后重新校验。
+- 未通过校验就交付 = 违反铁律 = 任务失败。
+
 【输出格式】严格按以下结构输出：
 1. 「优化后简历」— 完整 Markdown 简历（姓名等敏感信息原样保留占位符）
 2. 「改动说明」— 5 条以内，逐条说明做了什么改动、为什么（对应 JD 哪个要求）
 3. 「待补充清单」— 建议候选人补充的真实信息（仅当有缺口时输出）
+4. 「校验结果」— 附上 verify_rewrite 的最终结论（是否通过、版本号、有无提醒）
 
 ${language === "en" ? "全部输出使用英文。" : "全部输出使用简体中文。"}`;
 
@@ -56,10 +71,21 @@ ${language === "en" ? "全部输出使用英文。" : "全部输出使用简体�
 4. Keyword alignment: naturally embed core JD terms into matching experiences for ATS hits.
 5. Re-rank the skills section by JD priority.
 
+[Mandatory verification loop] (required, do not skip)
+The hard rules cannot rest on good intentions. After rewriting, you MUST call verify_rewrite:
+  verify_rewrite(original = original resume, rewritten = your rewritten resume)
+- If it returns ok=false, the rewrite introduced numbers or organizations absent from the
+  original. FIX the content and verify again until ok=true before delivering. Remove or
+  rephrase the fabricated parts; never "keep but annotate" them.
+- If ok=true with warnings (original data lost in the rewrite), restore genuine metrics
+  unless the omission was intentional, then verify again.
+- Delivering without passing verification = violating the hard rules = task failure.
+
 [Output format]
 1. "Optimized Resume" — full Markdown resume
 2. "Change Notes" — up to 5 bullets explaining each change and which JD requirement it targets
-3. "To Add" — real information the candidate should supply (only if gaps exist)`;
+3. "To Add" — real information the candidate should supply (only if gaps exist)
+4. "Verification" — the final verify_rewrite result (pass/fail, version, warnings)`;
 
   return language === "en" ? en : zh;
 };

@@ -3,9 +3,13 @@
 // 分层理由：本文件不 import 任何平台包，因此**在任何机器上都能直接测试**，
 // 且可被零依赖的 src/index.js 安全复用（避免模块双实例问题）。
 import { RESUME_SYSTEM_PROMPT } from './prompt.js'
+import { GUARD_VERSION, verifyRewrite } from './guard.js'
 
 /** 模型可见的工具名。 */
 export const TOOL_NAME = 'rewrite_resume'
+
+/** 反虚构校验工具名。 */
+export const VERIFY_TOOL_NAME = 'verify_rewrite'
 
 /** 交付说明：提示词片段与测试共用一处，避免文案漂移。 */
 export const DELIVERY_NOTE =
@@ -128,6 +132,180 @@ export function buildResumeValue({ jd, resume, language } = {}) {
  */
 export function declaredValueKeys() {
   return Object.keys(RESUME_VALUE_SCHEMA.properties).sort()
+}
+
+// ── 反虚构校验工具（verify_rewrite）────────────────────────────────
+//
+// 【为什么需要这个工具】
+// 改写指令集只是"告诉模型别编造"，提示词本身无法提供保证。
+// 本工具把校验交给**确定性代码**：模型改写完成后必须调用它，
+// 由代码比对原文与改写结果，报告是否存在原文没有的数字/实体。
+//
+// 【架构差异说明】
+// 本插件的改写由宿主会话模型完成，插件无法拦截其输出，
+// 因此校验做成独立工具、由模型在改写后主动调用，
+// 并在系统提示词中**强制要求**这一步（见 src/prompt.js 的交付流程）。
+
+/** 校验工具的参数契约（裸 JSON Schema）。 */
+export const VERIFY_PARAMETERS_JSON_SCHEMA = {
+  type: 'object',
+  additionalProperties: false,
+  properties: {
+    original: { type: 'string', description: '候选人简历原文（改写前的原始内容）' },
+    rewritten: { type: 'string', description: '改写后的简历内容（待校验）' },
+  },
+  required: ['original', 'rewritten'],
+}
+
+/**
+ * 校验工具的 canonical 输出契约。
+ *
+ * findings 用字符串数组而非对象数组，是为了适配平台 schema 白名单
+ * （仅允许 type/oneOf/properties/required/additionalProperties/items/enum/const，
+ * 嵌套对象数组会触碰校验边界；字符串数组最稳）。
+ */
+export const VERIFY_VALUE_SCHEMA = {
+  type: 'object',
+  additionalProperties: false,
+  properties: {
+    ok: { type: 'boolean', description: '是否通过校验（无 error 级问题）' },
+    guardVersion: { type: 'string', description: '校验规则版本' },
+    summary: { type: 'string', description: '面向模型的结论摘要与处理要求' },
+    issues: {
+      type: 'array',
+      items: { type: 'string' },
+      description: '问题清单（每项为一行可读文本；无问题则为空数组）',
+    },
+    errorCount: { type: 'number', description: 'error 级问题数量' },
+    warnCount: { type: 'number', description: 'warn 级问题数量' },
+    limitations: {
+      type: 'array',
+      items: { type: 'string' },
+      description: '本校验的已知局限（使用者须知晓边界，避免虚假安全感）',
+    },
+  },
+  required: ['ok', 'guardVersion', 'summary', 'issues', 'errorCount', 'warnCount', 'limitations'],
+}
+
+/**
+ * 校验工具的 canonical 返回值。字段与 {@link VERIFY_VALUE_SCHEMA} 严格一一对应。
+ * @typedef {object} VerifyToolValue
+ * @property {boolean} ok 是否通过校验（无 error 级问题）
+ * @property {string} guardVersion 校验规则版本
+ * @property {string} summary 面向模型的结论摘要与处理要求
+ * @property {string[]} issues 问题清单（每项一行可读文本）
+ * @property {number} errorCount error 级问题数量
+ * @property {number} warnCount warn 级问题数量
+ * @property {string[]} limitations 本校验的已知局限
+ */
+
+/**
+ * 纯函数：由原文与改写结果算出校验报告。
+ *
+ * @param {{ original?: unknown, rewritten?: unknown }} [args] 校验参数
+ * @returns {VerifyToolValue} 严格匹配 VERIFY_VALUE_SCHEMA 的返回值
+ * @throws {Error} 参数缺失或为空白时抛错
+ */
+export function buildVerifyValue({ original, rewritten } = {}) {
+  if (typeof original !== 'string' || original.trim() === '') {
+    throw new Error('original 为必填参数，且不能为空或纯空白')
+  }
+  if (typeof rewritten !== 'string' || rewritten.trim() === '') {
+    throw new Error('rewritten 为必填参数，且不能为空或纯空白')
+  }
+
+  const report = verifyRewrite({ original, rewritten })
+  const issues = report.findings.map(
+    (f) => `[${f.severity === 'error' ? '必须修正' : '建议检查'}] ${f.code}：${f.message}`,
+  )
+  const errorCount = report.findings.filter((f) => f.severity === 'error').length
+  const warnCount = report.findings.filter((f) => f.severity === 'warn').length
+
+  let summary
+  if (errorCount > 0) {
+    summary =
+      `校验未通过：发现 ${errorCount} 处疑似编造内容。` +
+      '你必须修正这些问题后重新提交 —— 删除或改写涉及编造数字/机构的表述，' +
+      '不得保留任何原文没有的量化数据或机构名。修正后请再次调用本工具确认通过。'
+  } else if (warnCount > 0) {
+    summary =
+      `校验通过（无编造），但有 ${warnCount} 处提醒：原文的部分真实数据在改写后消失。` +
+      '若非有意压缩，建议保留这些真实量化结果。'
+  } else {
+    summary = '校验通过：改写未引入原文不存在的数字或机构，且原文数据均被保留。'
+  }
+
+  return {
+    ok: report.ok,
+    guardVersion: report.guardVersion,
+    summary,
+    issues,
+    errorCount,
+    warnCount,
+    limitations: report.limitations,
+  }
+}
+
+/**
+ * 校验工具的完整定义（普通对象，零平台依赖）。
+ * @returns {object} 平台工具定义
+ */
+export function createVerifyToolDefinition() {
+  return {
+    name: VERIFY_TOOL_NAME,
+    description:
+      '反虚构校验（确定性代码执行，非模型判断）。传入简历原文与改写后内容，' +
+      '逐项比对改写是否引入了原文不存在的数字或机构名，并报告原文数据的丢失情况。' +
+      '改写简历后必须调用本工具；返回 ok=false 时必须先修正再交付。',
+    parameters: VERIFY_PARAMETERS_JSON_SCHEMA,
+    output: {
+      schema: VERIFY_VALUE_SCHEMA,
+      /**
+       * 把校验结果投影为模型可见内容：摘要 + 逐条明细。
+       * @param {unknown} _args 原始参数（平台契约要求签名包含，此处未使用）
+       * @param {VerifyToolValue} value 已校验的 canonical 值
+       * @returns {Array<{ type: string, text: string }>} 内容块数组
+       */
+      render: (_args, value) => {
+        const lines = [String(value?.summary ?? '')]
+        const issues = Array.isArray(value?.issues) ? value.issues : []
+        if (issues.length > 0) {
+          lines.push('', '明细：')
+          for (const item of issues) lines.push(`- ${item}`)
+        }
+        const limits = Array.isArray(value?.limitations) ? value.limitations : []
+        if (limits.length > 0) {
+          lines.push('', '本校验的已知边界（须自行确认）：')
+          for (const item of limits) lines.push(`- ${item}`)
+        }
+        return [{ type: 'text', text: lines.join('\n') }]
+      },
+    },
+    /**
+     * @param {unknown} args 模型传入的参数
+     * @returns {Promise<object>} 非法输入时 reject
+     */
+    async execute(args) {
+      const { original, rewritten } = /** @type {{ original?: string, rewritten?: string }} */ (
+        args || {}
+      )
+      return buildVerifyValue({ original, rewritten })
+    },
+    /**
+     * 待执行状态的界面呈现意图。
+     * @param {unknown} args 模型传入的参数
+     * @returns {object} 平台 generic card 描述
+     */
+    presentCall: (args) => {
+      const a = /** @type {{ rewritten?: string }} */ (args || {})
+      return {
+        card: 'generic',
+        title: '反虚构校验',
+        kind: 'other',
+        ...(typeof a.rewritten === 'string' ? { rawInput: a.rewritten.slice(0, 200) } : {}),
+      }
+    },
+  }
 }
 
 /**

@@ -13,8 +13,10 @@ import { dirname, join } from 'node:path'
 
 import {
   createToolDefinition,
+  createVerifyToolDefinition,
   buildResumeValue,
   TOOL_NAME,
+  VERIFY_TOOL_NAME,
 } from '../src/core.js'
 
 const here = dirname(fileURLToPath(import.meta.url))
@@ -77,12 +79,44 @@ console.log(
     '\n 真正的缺口判定与改写由会话模型按 instruction 规则完成。）',
 )
 
-rule('6. 渲染为模型可见内容')
+rule('6. 反虚构守卫：确定性代码校验（本项目核心能力）')
+// 把"禁止编造"从提示词约束升级为可执行校验：
+// 改写完成后由代码比对，报告是否引入原文没有的数字/机构。
+const verifyDef = createVerifyToolDefinition()
+console.log(`工具名: ${verifyDef.name}\n`)
+
+const guardCases = [
+  {
+    label: '编造数字（模型擅自加了 45%）',
+    original: '负责公司官网前端开发。',
+    rewritten: '负责公司官网前端开发，性能提升 45%。',
+  },
+  {
+    label: '编造机构（把原公司换成另一家）',
+    original: '在某互联网公司实习，负责接口开发。',
+    rewritten: '在字节跳动公司实习，负责接口开发。',
+  },
+  {
+    label: '合法改写（只强化措辞、保留真实数据）',
+    original: '负责前端开发，服务 80000 名用户。',
+    rewritten: '面向 80000 名用户主导前端开发，显著改善体验。',
+  },
+]
+
+for (const c of guardCases) {
+  const result = await verifyDef.execute({ original: c.original, rewritten: c.rewritten })
+  const verdict = result.ok ? '通过' : '拦下'
+  console.log(`  [${verdict}] ${c.label}`)
+  console.log(`      ${result.summary.split('。')[0]}。`)
+}
+console.log('\n  说明：校验由代码执行，不依赖模型的自觉。模型若编造，输出必然被拦下。')
+
+rule('7. 渲染为模型可见内容')
 const blocks = definition.output.render({ jd, resume }, value)
 console.log(`render 产出 ${blocks.length} 个 content block，首个 block 类型: ${blocks[0].type}`)
 console.log(`首个 block 前 120 字符:\n${blocks[0].text.slice(0, 120)}...`)
 
 rule('完成')
-console.log(`工具 "${TOOL_NAME}" 行为符合预期。`)
-console.log('在真实 DSH 会话中，上述 instruction 会由会话模型执行，产出最终简历。')
+console.log(`工具 "${TOOL_NAME}" 与 "${VERIFY_TOOL_NAME}" 行为符合预期。`)
+console.log('在真实 DSH 会话中，模型改写后会调用 verify_rewrite 自检，未通过则必须修正后重试。')
 console.log('')

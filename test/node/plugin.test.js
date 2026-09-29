@@ -15,6 +15,7 @@ import {
   name,
   inject,
   TOOL_NAME,
+  VERIFY_TOOL_NAME,
   SECTION_NAME,
   sectionText,
 } from '../../src/index.js'
@@ -98,10 +99,11 @@ describe('插件导出契约', () => {
 })
 
 describe('apply(ctx) 装载路径', () => {
-  test('不抛错且完成注册', () => {
+  test('不抛错且返回 disposer 列表', () => {
     const { ctx } = createSpyCtx()
     const result = apply(ctx)
-    assert.ok(result === undefined || typeof result === 'function')
+    // 平台契约：返回单个 disposer 或 disposer 数组，均被平台托管
+    assert.ok(result === undefined || typeof result === 'function' || Array.isArray(result))
   })
 
   test('恰好注册 1 个系统提示词 section', () => {
@@ -120,13 +122,14 @@ describe('apply(ctx) 装载路径', () => {
     assert.ok(typeof section.text === 'string' || typeof section.text === 'function')
   })
 
-  test('section.text 含工具名与反虚构铁律', () => {
+  test('section.text 含两个工具名与反虚构铁律', () => {
     const { ctx, calls } = createSpyCtx()
     apply(ctx)
     const section = calls.sections[0]
     const text = typeof section.text === 'function' ? section.text() : section.text
     assert.equal(text, sectionText())
-    assert.ok(text.includes(TOOL_NAME))
+    assert.ok(text.includes(TOOL_NAME), '应引导调用改写工具')
+    assert.ok(text.includes(VERIFY_TOOL_NAME), '应引导调用校验工具')
     assert.ok(text.includes('禁止编造'))
     assert.ok(text.includes('待补充清单'))
   })
@@ -138,38 +141,45 @@ describe('apply(ctx) 装载路径', () => {
     assert.equal(calls.sections[0].order, 2900)
   })
 
-  test('恰好注册 1 个工具，名称与常量一致', () => {
+  test('恰好注册 2 个工具：改写 + 反虚构校验', () => {
     const { ctx, calls } = createSpyCtx()
     apply(ctx)
-    assert.equal(calls.tools.length, 1)
-    assert.equal(calls.tools[0].name, TOOL_NAME)
+    assert.equal(calls.tools.length, 2)
+    const names = calls.tools.map((t) => t.name).sort()
+    assert.deepEqual(names, [TOOL_NAME, VERIFY_TOOL_NAME].sort())
   })
 
-  test('注册的工具带完整执行契约', () => {
+  test('每个注册的工具都带完整执行契约', () => {
     const { ctx, calls } = createSpyCtx()
     apply(ctx)
-    const tool = calls.tools[0]
-    assert.equal(typeof tool.execute, 'function')
-    assert.equal(typeof tool.output?.render, 'function')
-    assert.ok(tool.output?.schema)
-    assert.equal(typeof tool.description, 'string')
-    assert.ok(tool.description.length > 0)
+    for (const tool of calls.tools) {
+      assert.equal(typeof tool.execute, 'function', `${tool.name} 缺少 execute`)
+      assert.equal(typeof tool.output?.render, 'function', `${tool.name} 缺少 render`)
+      assert.ok(tool.output?.schema, `${tool.name} 缺少 output.schema`)
+      assert.equal(typeof tool.description, 'string')
+      assert.ok(tool.description.length > 0)
+    }
   })
 
   test('注册的工具是纯对象字面量（平台自行校验，不需 defineTool）', () => {
     const { ctx, calls } = createSpyCtx()
     apply(ctx)
-    assert.equal(Object.getPrototypeOf(calls.tools[0]), Object.prototype)
+    for (const tool of calls.tools) {
+      assert.equal(Object.getPrototypeOf(tool), Object.prototype)
+    }
   })
 
   test('apply 与测试使用同一份定义来源（无重复实现）', async () => {
     const { ctx, calls } = createSpyCtx()
     apply(ctx)
-    const { createToolDefinition } = await import('../../src/core.js')
-    const fromCore = createToolDefinition()
-    assert.equal(calls.tools[0].name, fromCore.name)
-    assert.equal(calls.tools[0].description, fromCore.description)
-    assert.deepEqual(calls.tools[0].parameters, fromCore.parameters)
+    const { createToolDefinition, createVerifyToolDefinition } = await import('../../src/core.js')
+    const expected = [createToolDefinition(), createVerifyToolDefinition()]
+    for (const def of expected) {
+      const actual = calls.tools.find((t) => t.name === def.name)
+      assert.ok(actual, `未注册 ${def.name}`)
+      assert.equal(actual.description, def.description)
+      assert.deepEqual(actual.parameters, def.parameters)
+    }
   })
 
   test('可重复装载，不共享可变状态', () => {
@@ -177,9 +187,12 @@ describe('apply(ctx) 装载路径', () => {
     const b = createSpyCtx()
     apply(a.ctx)
     apply(b.ctx)
-    assert.equal(a.calls.tools.length, 1)
-    assert.equal(b.calls.tools.length, 1)
+    assert.equal(a.calls.tools.length, 2)
+    assert.equal(b.calls.tools.length, 2)
     assert.notEqual(a.calls.tools[0], b.calls.tools[0])
-    assert.equal(a.calls.tools[0].name, b.calls.tools[0].name)
+    assert.deepEqual(
+      a.calls.tools.map((t) => t.name),
+      b.calls.tools.map((t) => t.name),
+    )
   })
 })

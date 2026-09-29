@@ -18,10 +18,15 @@
 // 契约常量与业务逻辑仍在 ./core.js（同样零依赖），测试可离线覆盖真实生产代码。
 import {
   TOOL_NAME,
+  VERIFY_TOOL_NAME,
   RESUME_PARAMETERS_JSON_SCHEMA,
   RESUME_VALUE_SCHEMA,
+  VERIFY_PARAMETERS_JSON_SCHEMA,
+  VERIFY_VALUE_SCHEMA,
   buildResumeValue,
+  buildVerifyValue,
   createToolDefinition,
+  createVerifyToolDefinition,
 } from './core.js'
 
 export const name = 'resume-studio'
@@ -29,13 +34,20 @@ export const inject = ['tools', 'systemPrompt']
 
 export {
   TOOL_NAME,
+  VERIFY_TOOL_NAME,
   RESUME_PARAMETERS_JSON_SCHEMA,
   RESUME_VALUE_SCHEMA,
+  VERIFY_PARAMETERS_JSON_SCHEMA,
+  VERIFY_VALUE_SCHEMA,
   DELIVERY_NOTE,
   buildResumeValue,
+  buildVerifyValue,
   normalizeLanguage,
   createToolDefinition,
+  createVerifyToolDefinition,
 } from './core.js'
+
+export { GUARD_VERSION, verifyRewrite } from './guard.js'
 
 /**
  * 系统提示词片段。定义在插件侧，apply 时注入。
@@ -50,8 +62,16 @@ export function sectionText() {
     '当用户要求「按岗位定制简历 / 根据 JD 优化简历 / 针对该招聘要求改简历」时，调用 `' +
     TOOL_NAME +
     '`：传入 `jd`（岗位描述原文）与 `resume`（简历原文）。\n' +
-    '工具返回简历改写指令集，你必须严格按其中的规则产出三部分：优化后简历 / 改动说明 / 待补充清单。\n' +
-    '铁律：只基于简历中真实存在的信息重排与强化，禁止编造任何新经历、新数据、新技能。'
+    '工具返回简历改写指令集，你必须严格按其中的规则产出四部分：' +
+    '优化后简历 / 改动说明 / 待补充清单 / 校验结果。\n' +
+    '铁律：只基于简历中真实存在的信息重排与强化，禁止编造任何新经历、新数据、新技能。\n' +
+    '\n' +
+    '**反虚构校验是强制步骤**：改写完成后必须调用 `' +
+    VERIFY_TOOL_NAME +
+    '`（传入 original = 简历原文、rewritten = 改写后全文），' +
+    '由确定性代码比对是否引入原文没有的数字或机构名。\n' +
+    '若返回 ok=false，必须修正后重新校验，直到通过才能交付；' +
+    '未通过校验就交付视为违反铁律。'
   )
 }
 
@@ -61,11 +81,11 @@ const SECTION_ORDER_FALLBACK = 2900
 /**
  * 插件装配入口。由 DSH loader 调用。
  *
- * 只做两件事：注入一段系统提示词、注册一个工具。
- * 业务逻辑与契约常量全部在 ./core.js —— 唯一事实来源，避免双份定义漂移。
+ * 只做两件事：注入一段系统提示词、注册两个工具。
+ * 业务逻辑与契约常量全部在 ./core.js 与 ./guard.js —— 唯一事实来源，避免双份定义漂移。
  *
  * @param {any} ctx cordis 上下文，需提供 systemPrompt 与 tools 两个服务
- * @returns {void | (() => void)} 工具注册的 disposer（由平台托管）
+ * @returns {void | Array<() => void>} 工具注册的 disposer 列表（由平台托管）
  */
 export function apply(ctx) {
   // 1) 系统提示词注入（对平台位次 API 做防御性降级）
@@ -81,7 +101,12 @@ export function apply(ctx) {
 
   // 2) 工具注册：普通对象 + 裸 JSON Schema，零平台依赖。
   //    定义来源与测试所测的是同一个函数，杜绝"测试绿但线上崩"。
-  return ctx.tools.register(createToolDefinition())
+  //    两个工具：改写指令集（rewrite_resume）+ 反虚构校验（verify_rewrite）。
+  const disposers = [
+    ctx.tools.register(createToolDefinition()),
+    ctx.tools.register(createVerifyToolDefinition()),
+  ]
+  return disposers
 }
 
 export default { name, inject, apply }

@@ -103,6 +103,12 @@ jobs:
             console.log('✅ 反虚构铁律完整');
           "
 
+      # 反虚构从"提示词约束"升级为"确定性代码校验"是本项目的核心差异。
+      # 这里做行为级验证：编造必须被拦住，合法改写必须放行。
+      # 只做静态关键词检查不够——守卫可能被改成永远返回 ok 而检查毫无察觉。
+      - name: Anti-fabrication guard must actually block fabrication
+        run: npm run check:guard
+
       - name: Publish audit (credentials + internal content)
         run: npm run check:secrets
 
