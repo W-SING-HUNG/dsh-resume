@@ -126,7 +126,7 @@ function loadInternalPaths() {
  *
  * 为什么（真实事故，2026-09-28）：
  * 原先的实现是"读 .git/info/exclude 的条目，逐个前缀比对"。
- * 但有人新增了 docs/REPO-COMPARISON.md 却忘了登记到名单里，
+ * 但有人新增了一份内部文档却忘了登记到名单里，
  * 于是检查放行、文件被提交进公开仓库——**枚举式名单必然滞后**。
  * 改为让 git 自己回答"这个文件是否被忽略"之后，
  * 名单里有没有登记都不影响判定：只要 git 认为它该被忽略，就是内部资料。
@@ -178,7 +178,7 @@ for (const rel of listTrackedFiles()) {
   // E 层：内部路径级拦截。
   //
   // 判定由 git 给出（check-ignore），不看我们自己维护的名单 ——
-  // 因为"名单忘了登记"正是上一版漏掉 docs/REPO-COMPARISON.md 的原因。
+  // 因为"名单忘了登记"正是上一版漏掉一份内部文档的原因。
   // 只要本地排除规则认为它该被忽略，而它却被跟踪了，就是事故。
   if (isIgnoredByGit(rel) || isInternalPath(rel, internalPaths)) {
     findings.push({
