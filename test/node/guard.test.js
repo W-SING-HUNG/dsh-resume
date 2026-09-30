@@ -641,6 +641,67 @@ describe('守卫：真实简历文本上的专名与技术栈检查（S1-2）', 
     assert.ok(report.findings.some((f) => f.code === 'FABRICATED_ENTITY'))
   })
 
+  test('中文机构名提取：日期前缀不得静默关闭检测', () => {
+    // 【外部审查标注"待确认"，我实测确认为缺陷】
+    // 机构名提取里有一条"名字不得含数字"的规则（防止日期残片粘进机构名，
+    // 见 `06 某大学` 那类假告警）。但早期写法是 `if (/\d/.test(name)) continue`
+    // —— 因为粘了日期残片就把**整个机构名一起丢掉**，于是日期前缀
+    // **静默关闭**了机构名检测：
+    //   `- 2026.06 某互联网公司`  → 提取结果 `[]`（而不是 `某互联网公司`）
+    //   → `- 2026.06 某互联网公司` 改成 `- 2026.06 字节跳动公司` **零告警**
+    // 现改为**剥掉前导日期片段**再判，机构名照常提取。
+    assert.deepEqual(
+      [...extractChineseOrgNames('- 2026.06 某互联网公司')],
+      ['某互联网公司'],
+      '日期前缀不得使机构名提取失败',
+    )
+    // 两侧：带日期前缀换公司名必须拦住
+    const report = verifyRewrite({
+      original: '- 2026.06 某互联网公司',
+      rewritten: '- 2026.06 字节跳动公司',
+    })
+    assert.equal(report.ok, false, '带日期前缀的换公司名必须拦下')
+    assert.ok(report.findings.some((f) => f.code === 'FABRICATED_ENTITY'))
+
+    // 反向：日期格式规范化不得因剥离而产生假告警（这是那条"不含数字"规则的初衷）
+    for (const [original, rewritten] of [
+      ['- 2022.09 - 2026.06 某大学；', '- 2022年9月 - 2026年6月 某大学；'],
+      ['- 2025.07 - 2025.09 某公司；', '- 2025年7月 - 2025年9月 某公司；'],
+    ]) {
+      const r = verifyRewrite({ original, rewritten })
+      assert.deepEqual(
+        r.findings.filter((f) => f.severity === 'error').map((f) => f.code),
+        [],
+        `日期格式规范化不得拒绝导出：${rewritten}`,
+      )
+    }
+  })
+
+  test('中文数量单位不得啃掉中文词（字节跳动 ≠ 2026.06 字节）', () => {
+    // 【实测抓出的误报】单位表里有 `字节`（bytes），而 `字节跳动`（ByteDance）
+    // 以它开头。右界原为 `(?![\w])`，但 `\w` **不含汉字**，于是：
+    //   `- 2026.06 字节跳动公司` → 匹配成「2026.06 字节」→ 归一化为 `size:2026.06`
+    // 后果：换公司名被报成"编造数字：size:2026.06"（用户看不懂的告警），
+    // 且日期 token 被吞进 unitConsumed，日期检查同时失灵。
+    assert.ok(
+      ![...extractNumericTokens('- 2026.06 字节跳动公司')].some((t) => t.startsWith('size:')),
+      '`字节跳动` 不得被啃成容量单位',
+    )
+    // 真实单位仍须归一化（反向锁定，别把单位功能一起改坏）
+    for (const [text, want] of [
+      ['- 支持 2GB 大文件', 'size:2147483648'],
+      ['- 大小 512 字节', 'size:512'],
+      ['- 耗时 2.4s', 'time:2.4'],
+      ['- 响应 320ms', 'time:0.32'],
+    ]) {
+      assert.ok(
+        [...extractNumericTokens(text)].includes(want),
+        `${text} 的单位归一化不得失效`,
+      )
+    }
+  })
+
+
   test('小写技术名被编造必须被抓住：redis / mysql', () => {
     const rewritten = RESUME.replace(
       '- 使用 Vuex 管理用户登录态与购物车数据；',
