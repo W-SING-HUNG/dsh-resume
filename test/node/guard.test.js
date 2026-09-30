@@ -1278,69 +1278,150 @@ describe('守卫：结构性判据不得放掉真编造（另一侧锁定）', (
     }
   })
 
-  // ── 注记位判据的两侧（真实简历实测抓出的误报 + 自测抓出的口子）────────
+  // ── 括号注记：宽松化的尝试被回退，此处锁定"严格版"行为 ──────────────
   //
-  // 【误报侧】多词注记原先只认**第一个词**（只看紧邻前 3 字符）：
-  //   `GPA 3.6/4.0（Grade Point Average）`
-  //   → `Grade` 前是 `（` 放行；`Point`/`Average` 前是空格 → **判 error 并拒绝导出**。
-  // 【口子侧】改成"落在括号内就算注记"后，自测发现会放过凭空夹带的技能：
-  //   `- 熟悉 Java；` → `- 熟悉 Java（Java Virtual Machine）；`
-  //   `- 熟悉 Java；` → `- 熟悉 Java（Redis 缓存与消息队列）；`
-  // 故最终判据：括号跨度须是**纯拉丁短语**，且括号前若是拉丁缩写，
-  // 其首字母必须与该短语相符（`GPA` ← `Grade Point Average` ✅；
-  // `Java` ← `Java Virtual Machine` ✗）。
-  test('多词英文全称注记必须放行（只看紧邻三字符会误拒）', () => {
+  // 【为什么不放宽（一次失败尝试的完整记录，务必读）】
+  // 真实简历实测发现两处误报：
+  //   ① 多词英文全称 `GPA 3.6/4.0（Grade Point Average）` 被拒；
+  //   ② 标题加英文对照 `## 专业技能（Skills）` 被判"凭空新增整条"。
+  // 我于是放宽注记判据（"落在括号跨度内即算注记""剥掉纯拉丁注记后再比对原文"），
+  // 两处误报确实修好了——**但独立审查逐条对比后抓出 4 处新泄漏**：
+  //   `数据库（Random Keyspace）`、`数据库（Redis Cluster）`、
+  //   `数据库（redis cluster）`、`## 项目经历（2024）`，全部从"拦住"变成"可导出"。
+  // 即"修好 2 个误报，放过 4 个编造"——**净亏损**，已整体回退。
+  //
+  // 结论：**编造无法投递**的优先级高于"少拦几次"。括号注记保持严格：
+  // 只有"紧邻左括号/斜杠 **且括号前是中文术语**"才放行（中文↔英文的 ATS 并列），
+  // 其余一切括号内容都按新增主张处理。
+  test('括号不得成为夹带编造技能的通道（严格版锁定）', () => {
     for (const [original, rewritten] of [
-      ['GPA 3.6/4.0，专业排名前 15%', 'GPA 3.6/4.0（Grade Point Average），专业排名前 15%'],
-      ['- GPA 3.5，专业排名前 10%；', '- GPA 3.5（Grade Point Average），专业排名前 10%；'],
-    ]) {
-      const report = verifyRewrite({ original, rewritten })
-      assert.deepEqual(
-        report.findings.filter((f) => f.severity === 'error').map((f) => f.code),
-        [],
-        `英文全称展开是合法写法，不得拒绝导出：${rewritten}`,
-      )
-    }
-  })
-
-  test('括号不得成为夹带编造技能的通道（首字母对不上则不放行）', () => {
-    for (const [original, rewritten] of [
+      // 中文在前的编造：必须拦（放宽版会全部放过）
+      ['- 熟悉数据库的使用；', '- 熟悉数据库（Random Keyspace）的使用；'],
+      ['- 熟悉数据库的使用；', '- 熟悉数据库（Redis Cluster）的使用；'],
+      ['- 熟悉数据库的使用；', '- 熟悉数据库（redis cluster）的使用；'],
+      // 拉丁在前的编造
       ['- 熟悉 Java；', '- 熟悉 Java（Java Virtual Machine）的使用；'],
-      ['- 熟悉 Java；', '- 熟悉 Java（Redis 缓存与消息队列）的使用；'],
       ['- 熟悉 Java；', '- 熟悉 Java（Redis、Kafka）的使用；'],
+      // 标题里夹带（中文括号内容）
+      ['# 张伟\n## 项目经历\n- 熟悉 Java；', '# 张伟\n## 项目经历（2024）\n- 熟悉 Java；'],
+      ['# 张伟\n## 项目经历\n- 熟悉 Java；', '# 张伟\n## 项目经历（用户增长系统）\n- 熟悉 Java；'],
     ]) {
       const report = verifyRewrite({ original, rewritten })
       assert.equal(
         report.ok,
         false,
-        `借括号夹带原文没有的技术名必须拦下：${rewritten}`,
+        `借括号夹带原文没有的内容必须拦下：${rewritten}`,
       )
     }
   })
 
-  test('标题加英文对照不得被判为"凭空新增整条"', () => {
-    // 标题被注记"撑"成内容单元（≥8 字），原标题因太短本不是内容单元，
-    // 于是与任何原文单元都对不上 → 曾被判 NOVEL_CONTENT 并拒绝导出。
+  test('已知残余泄漏：中文在后、拉丁短语在括号内（仅 warn，不阻断）', () => {
+    // 这一形态当前**只报 warn**（可导出），是已声明的残余风险：
+    //   `- 熟悉 Java；` → `- 熟悉 Java（Redis 缓存与消息队列）的使用；`
+    // 它在文本上与"把中文术语并列英文写法"高度相似（括号内是拉丁短语+中文），
+    // 收紧它会连带误伤大量合法注记。
+    // 本用例把**现状**固定下来：一旦有人改进判据使其变 error，此断言会失败，
+    // 从而提醒同步更新 CHANGELOG 与 GUARD_LIMITATIONS。
+    const report = verifyRewrite({
+      original: '- 熟悉 Java；',
+      rewritten: '- 熟悉 Java（Redis 缓存与消息队列）的使用；',
+    })
+    assert.equal(report.ok, true, '当前为已知残余泄漏（仅 warn）')
+    assert.ok(
+      report.findings.some((f) => f.code === 'AMBIGUOUS_NEW_TERM'),
+      '至少必须报出待确认，不得静默',
+    )
+  })
+
+  test('合法的中文↔英文并列注记必须放行', () => {
+    // 这是严格版仍然支持的形态：**括号前是中文术语**。
+    for (const [original, rewritten] of [
+      ['- 熟悉超文本传输协议的使用；', '- 熟悉超文本传输协议（HTTP）的使用；'],
+      ['- 熟悉结构化查询语言的使用；', '- 熟悉结构化查询语言（SQL）的使用；'],
+      ['- 熟悉接口设计规范的使用；', '- 熟悉接口设计规范（API）的使用；'],
+      ['- 熟悉持续集成流程的使用；', '- 熟悉持续集成流程 / CI 的使用；'],
+    ]) {
+      const report = verifyRewrite({ original, rewritten })
+      assert.deepEqual(
+        report.findings.filter((f) => f.severity === 'error').map((f) => f.code),
+        [],
+        `中文术语并列英文写法是 ATS 常规动作，不得拒绝导出：${rewritten}`,
+      )
+    }
+  })
+
+  // ── 多词拉丁注记：只认"缩写 + 其全称" ────────────────────────────────
+  //
+  // 【判据来源】两类多词括号内容在**是否新增技能主张**上本质不同：
+  //   · 展开已有缩写 `JVM（Java Virtual Machine）` → 未声称新技能 → 应放行；
+  //   · 借括号夹带 `数据库（Redis Cluster）` → 真正的编造 → 必须拦。
+  // 故对"括号前是拉丁词"的情形，要求括号内各词首字母拼起来等于该词。
+  // 这只是必要条件（`SQL（Simple Query Layer）` 也能满足），
+  // 但它展开的是**已有**技能，未新增技能主张，危害有限。
+  test('缩写展开为全称必须放行（未新增技能主张）', () => {
+    for (const [original, rewritten] of [
+      ['- 精通 JVM 调优；', '- 精通 JVM（Java Virtual Machine）调优；'],
+      ['GPA 3.6/4.0，专业排名前 15%', 'GPA 3.6/4.0（Grade Point Average），专业排名前 15%'],
+      // camelCase 全称：HTTP = HyperText Transfer Protocol
+      // （取"所有大写字母"而非"每词首字母"，否则会得到 HTP 而误判）
+      ['- 熟悉 HTTP 协议；', '- 熟悉 HTTP（HyperText Transfer Protocol）协议；'],
+      ['- 熟悉 SQL 查询；', '- 熟悉 SQL（Structured Query Language）查询；'],
+    ]) {
+      const report = verifyRewrite({ original, rewritten })
+      assert.deepEqual(
+        report.findings.filter((f) => f.severity === 'error').map((f) => f.code),
+        [],
+        `把已有缩写展开成全称是合法写法，不得拒绝导出：${rewritten}`,
+      )
+    }
+  })
+
+  test('首字母/大小写对不上的括号内容仍按新增主张拦下', () => {
+    for (const [original, rewritten] of [
+      // Java 不是缩写（带小写字母），给它挂"全称"只可能是编造
+      ['- 熟悉 Java；', '- 熟悉 Java（Just Another Vague Abbreviation）；'],
+      ['- 熟悉 Java；', '- 熟悉 Java（Java Application Virtual Architecture）；'],
+      ['- 熟悉 Java；', '- 熟悉 Java（Java Virtual Machine）的使用；'],
+      // 括号内是原文没有的技能
+      ['- 熟悉数据库的使用；', '- 熟悉数据库（Random Keyspace）的使用；'],
+      ['- 熟悉数据库的使用；', '- 熟悉数据库（Redis Cluster）的使用；'],
+      ['- 熟悉数据库的使用；', '- 熟悉数据库（Very Fast Cache）的使用；'],
+      ['- 熟悉数据库的使用；', '- 熟悉数据库（redis cluster）的使用；'],
+      ['- 熟悉 Java；', '- 熟悉 Java（Redis、Kafka）的使用；'],
+    ]) {
+      const report = verifyRewrite({ original, rewritten })
+      assert.equal(report.ok, false, `借括号夹带原文没有的内容必须拦下：${rewritten}`)
+    }
+  })
+
+  // ── 已知误报（严格侧的代价，如实锁定）─────────────────────────────
+  //
+  // 括号前是**中文**时无法做首字母校验，故一律按"新增主张"处理。
+  // 代价是下面这条合法写法被误拒——它是**已知误报**，不是行为正确。
+  // 用测试明确记录（而非假装正确）：将来找到兼顾两侧的判据时，
+  // 这条断言会失败，从而提醒同步更新 CHANGELOG 与 GUARD_LIMITATIONS。
+  test('已知误报：中文术语 + 英文全称展开（暂接受误拒）', () => {
+    const report = verifyRewrite({
+      original: '- 熟悉超文本传输协议的使用；',
+      rewritten: '- 熟悉超文本传输协议（HyperText Transfer Protocol）的使用；',
+    })
+    assert.equal(
+      report.ok,
+      false,
+      '当前判定为误报（已知）——若此断言失败，说明判据已改进，请同步更新本用例与 CHANGELOG',
+    )
+  })
+
+  test('已知误报：标题加英文对照（中文括号内容，暂接受误拒）', () => {
     const report = verifyRewrite({
       original: '# 张伟\n## 专业技能\n- 熟悉 Java；',
       rewritten: '# 张伟\n## 专业技能（Skills）\n- 熟悉 Java；',
     })
-    assert.deepEqual(
-      report.findings.filter((f) => f.severity === 'error').map((f) => f.code),
-      [],
-      '给已有标题并列英文写法是 ATS 常见动作，不得拒绝导出',
+    assert.equal(
+      report.ok,
+      false,
+      '当前判定为误报（已知）——若此断言失败，说明判据已改进，请同步更新本用例与 CHANGELOG',
     )
-  })
-
-  test('但中文括号内容视为新增信息，不得借"剥括号"豁免', () => {
-    // 与上一条成对：剥离豁免**只对纯拉丁注记**生效。
-    // 若不加限定，`项目经历（用户增长系统）` 剥掉括号得 `项目经历`（原文有）
-    // → 编造的项目名被放过。
-    const report = verifyRewrite({
-      original: '# 张伟\n## 项目经历\n- 熟悉 Java；',
-      rewritten: '# 张伟\n## 项目经历（用户增长系统）\n- 熟悉 Java；',
-    })
-    assert.equal(report.ok, false, '中文括号里的新项目名属新增主张，必须拦下')
   })
 
   // ── "收缩写法"不得成为"另起一行新增技能"的挡箭牌（第四次绕过后的根本约束）──
