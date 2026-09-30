@@ -1581,6 +1581,9 @@ export function stripMarkdownSyntax(input) {
       return line
     })
     .join('\n')
+    // HTML 注释是**编者注**（`<!-- 本节待补充 -->`），不是简历内容，
+    // 也不面向读者 → 整段剥掉。否则会被判"凭空新增"并拒绝导出（实测）。
+    .replace(/<!--[\s\S]*?-->/g, ' ')
     .replace(/\[([^\]]*)\]\([^)]*\)/g, '$1') // 链接 → 链接文字
     .replace(/`([^`]*)`/g, '$1') // 行内代码 → 内容
     .replace(/\*{1,3}([^*\n]+)\*{1,3}/g, '$1') // 粗体/斜体 → 文字
@@ -3310,58 +3313,44 @@ export function verifyRewrite({ original, rewritten, claimedKeywords } = {}) {
   // 含职责动词与数字，是事实性主张，必须判 error。
   // 另一类是**无主张的说明性文字**：
   //   `> 以下为在校期间荣誉`、`*本简历由本人独立撰写*`
-  // 它们确实是原文没有的内容，但不含任何可被面试追问的事实
-  // （没有数字、没有机构/技术名、没有职责动词）。
+  // 它们确实是原文没有的内容，但不含任何可被面试追问的事实。
   // 判 error 只会让用户拿不到文件，收益为零。
   // 故：含事实主张 → error；否则 → warn（提示但不阻断交付）。
-  //
-  // 【判据用**结构性信号**，不维护虚词清单】
-  // 说明性文字（落款、章节导语、注释）都出现在**正文**；
-  // 而编造章节/项目名出现在**标题行**（`## 项目经历（用户增长系统）`）。
-  // 标题行的新增意味着"多了一个章节/项目"——那是硬性事实主张，必须拦。
-  /** 该单元是否出现在标题行（`#` 开头） */
-  const isOnHeadingLine = (/** @type {string} */ unit) =>
-    rewrittenText
-      .split('\n')
-      .some((line) => /^\s*#{1,6}\s/.test(line) && line.includes(unit.replace(/^#+\s*/, '').trim()))
   /**
-   * 该单元是否作为**列表项**（简历条目）出现在改写文本里。
+   * 该单元是否是**纯说明性文字**（不含事实主张）。
    *
-   * 【为什么这是"含事实主张"的结构信号（实测抓出的漏报）】
-   * 我给 NOVEL_CONTENT 分级时用了"含数字/机构/技术名/职责动词"作判据，
-   * 于是下面这条被误判为"说明性文字"而放行：
-   *   `- 补充：性能优化与容灾设计（A/B 测试）`
-   * 它确实**声称了一项新能力**，只是措辞里没有那些特征词。
-   * 而真正的说明性文字（落款、章节导语）**不是列表项**：
-   *   `*本简历由本人独立撰写*`、`> 以下为在校期间荣誉`
-   * 故"是否以列表标记开头"是一个可靠的结构区分。
+   * 【判据方向：**默认视为事实主张**，只对"明确非主张"的形态放行】
    *
-   * ⚠️ 两个坑，都实测踩到过：
-   *  1. 单元来自**已剥离 markdown** 的文本（`stripMarkdownSyntax` 去掉了 `**`），
-   *     因此必须拿**剥离后的行**去匹配——否则 `**性能优化**` 这种加粗写法匹配不上。
-   *  2. `rewrittenText` 已经过 `normalizeText`，而它会**剥掉行首列表序号**
-   *     （`1. 掌握 X` → `掌握 X`）。直接用它判断"是不是列表项"会永远失败，
-   *     于是有序列表化后的新增技能仍被当成"说明性文字"放行。
-   *     故这里必须用**未经 normalizeText 的原始输入** `rewritten`。
+   * 我第一版写的是"什么算事实主张"（白名单：含数字/机构/技术名/职责动词
+   * → error，其余 → warn）。那是**枚举式判据，必然漏**——实测被连续绕过：
+   *   `- 补充：性能优化与容灾设计`（无特征词）→ 只 warn → 放行
+   *   `本人具备优秀的跨团队沟通能力。`（普通段落）→ 只 warn → 放行
+   *   `已通过注册会计师全科考试。`（普通段落）→ 只 warn → 放行
+   *   `| 架构设计 | 精通 |`（表格单元格）→ 零告警 → 放行
+   * 这些都是**可被面试追问的事实性主张**，放行等于放掉编造。
+   * —— 与本项目此前在"技术名词表""发布审计名单"上踩的是同一个坑：
+   *    **枚举"哪些算"永远滞后，应改为枚举"哪些不算"**。
+   *
+   * 故改为：只有当内容**明确不含任何主张**时才算说明性文字。当前只认三类：
+   *   ① 整行是**围栏/水平线/纯标点**等结构符号；
+   *   ② 含明确的**元陈述词**（本简历/以上/以下/注：/说明/详见/参见…）；
+   *   ③ 极短且无实义（如单字、纯符号）。
+   * 其余一律按事实主张处理（error）——保守侧，与"宁可误拦不放行编造"一致。
    */
-  const isListItem = (/** @type {string} */ unit) =>
-    stripMarkdownSyntax(/** @type {string} */ (rewritten))
-      .split('\n')
-      .some((line) => {
-        if (!/^\s*(?:[-*+]|\d+[.)])\s+/.test(line)) return false
-        return line.replace(/^\s*(?:[-*+]|\d+[.)])\s+/, '').trim().includes(unit.trim())
-      })
-  const claimsFacts = (/** @type {string} */ unit) => {
-    if (isOnHeadingLine(unit)) return true // 标题行新增 = 多了一个章节/项目
-    if (isListItem(unit)) return true // 作为简历条目新增 = 一项能力/经历主张
-    if (/\d/.test(unit)) return true // 含数字（量化结果/日期）
-    if (extractChineseOrgNames(unit).size > 0) return true // 含机构名
-    if (extractLatinProperNouns(unit).size > 0) return true // 含拉丁专名
-    if (extractResponsibilityLevel(unit).maxLevel > 0) return true // 含职责动词
+  const SOFT_META_PATTERN =
+    /本简历|本人独立撰写|以上(?:内容|经历|信息)|以下(?:内容|经历|荣誉|信息)|注[：:]|说明[：:]|详见|参见|按.{0,6}排列|真实有效|仅供参考|未完待续/
+  const isSoftExplanatory = (/** @type {string} */ unit) => {
+    const t = unit.trim()
+    // ① 纯结构符号（水平线、围栏、表格分隔行的残留）
+    if (/^[-*_=~`|\s]+$/.test(t)) return true
+    // ② 含元陈述词（"以上为在校期间荣誉"、"注：按时间倒序排列"）
+    if (SOFT_META_PATTERN.test(t)) return true
+    // ③ 极短且无实义（单字/双字，多为编号残留）
+    if (t.replace(/[\s\p{P}]/gu, '').length <= 2) return true
     return false
   }
-  const blockingSurvivors = survivors.filter(claimsFacts)
-  const softSurvivors = survivors.filter((u) => !claimsFacts(u))
+  const blockingSurvivors = survivors.filter((u) => !isSoftExplanatory(u))
+  const softSurvivors = survivors.filter(isSoftExplanatory)
 
   if (blockingSurvivors.length > 0) {
     const preview = blockingSurvivors
