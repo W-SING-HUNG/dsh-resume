@@ -389,3 +389,50 @@ describe('verify_rewrite 的 error 摘要按实际 finding 生成', () => {
     await assert.rejects(() => verifyDef.execute({}), /original/)
   })
 })
+
+// ── 工具 description 必须与实现同步 ───────────────────────────────────────
+//
+// 【为什么必须锁定】description 是模型决定"要不要用、怎么用"的依据，
+// 属于**会随判定扩展而失效的文案**。它此前只列了"数字/机构/职责/日期/数据丢失"，
+// 而判定后来已扩展到整条新增、关键词回验、技术名消失——描述落后会误导模型，
+// 尤其"claimedKeywords 会被回验"这一点在 prompt 里承诺了、描述里却没写，
+// 模型可能因此虚报覆盖率。
+//
+// 本用例的做法：**从实现里取真实的 finding code，反查 description 是否覆盖**，
+// 而不是随手写几个关键词断言（那样新增 code 时不会失败）。
+describe('工具 description 与实现同步', () => {
+  /** 每个 error/warn code 至少要在 description 里有对应的语义描述。 */
+  const CODE_TO_DESC_HINT = /** @type {Record<string, RegExp>} */ ({
+    FABRICATED_NUMBER: /数字/,
+    FABRICATED_ENTITY: /机构|专名/,
+    RESPONSIBILITY_INFLATED: /职责/,
+    FABRICATED_DATE: /时间|日期/,
+    NOVEL_CONTENT: /新增|整条/,
+    UNVERIFIED_KEYWORD_CLAIM: /claimedKeywords|关键词/,
+    LOST_NUMBER: /丢失|数据/,
+    VANISHED_TECH_TERM: /消失|技术名/,
+  })
+
+  test('description 覆盖每一类判定（新增 code 时必须同步补描述）', () => {
+    const verifyDef = createVerifyToolDefinition()
+    const desc = verifyDef.description
+    const missing = Object.entries(CODE_TO_DESC_HINT)
+      .filter(([, re]) => !re.test(desc))
+      .map(([code]) => code)
+    assert.deepEqual(
+      missing,
+      [],
+      `description 未覆盖这些判定的语义：${missing.join('、')}——` +
+        '新增判定时必须同步更新 description，否则模型会误判工具能力',
+    )
+  })
+
+  test('description 必须提到 claimedKeywords 会被回验', () => {
+    const verifyDef = createVerifyToolDefinition()
+    assert.match(
+      verifyDef.description,
+      /claimedKeywords|关键词/,
+      'prompt 里承诺了关键词回验，描述里也必须说明，否则模型可能虚报覆盖率',
+    )
+  })
+})

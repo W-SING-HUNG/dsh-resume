@@ -181,6 +181,92 @@ if (existsSync(wfDir)) {
   }
 }
 
+// ── 4. Markdown 表格结构 ────────────────────────────────────────────
+//
+// 【存在理由】README 是**面向用户的公开面**，表格破损会直接渲染错乱。
+// 实测踩过一次：编辑时把两行合并成一行，出现 `|...||...|`，
+// 整行在 GitHub 上渲染成错位的单元格——而当时的检查全部通过
+// （路径存在、script 定义齐全），没有任何东西会发现它。
+//
+// 判据：同一表格内，每行的单元格数必须与表头一致。
+// 注意要**先保护转义竖线**（`\|`，如 `language: 'zh' \| 'en'`），
+// 否则会把一个单元格误算成两个（实测误报）。
+const SENTINEL = '\u0000'
+/** 数一行 markdown 表格有几个单元格（正确处理转义竖线）。 */
+function countCells(line) {
+  return line
+    .split('\\|')
+    .join(SENTINEL)
+    .replace(/^\||\|$/g, '')
+    .split('|')
+    .map((c) => c.split(SENTINEL).join('\\|')).length
+}
+/**
+ * 找出 markdown 内容里所有表格列数不一致的行。
+ * @param {string} content 文件内容
+ * @returns {Array<{line: number, cells: number, headerCells: number, headerLine: number}>} 问题行
+ */
+function findTableProblems(content) {
+  const out = []
+  const lines = content.split('\n')
+  let inTable = false
+  let headerCells = 0
+  let headerLine = 0
+  lines.forEach((line, i) => {
+    if (!/^\s*\|/.test(line)) {
+      inTable = false
+      return
+    }
+    const cells = countCells(line.trim())
+    if (!inTable) {
+      inTable = true
+      headerCells = cells
+      headerLine = i + 1
+      return
+    }
+    // 跳过分隔行（|---|---|）
+    if (/^\s*\|[\s:|-]+\|\s*$/.test(line)) return
+    if (cells !== headerCells) {
+      out.push({ line: i + 1, cells, headerCells, headerLine })
+    }
+  })
+  return out
+}
+
+// ── 自检：本检查必须真的会失败（否则等于没有）──────────────────────
+//
+// 沿用 `check-secrets` 的做法：故意构造违规样例，确认能被检出。
+// 一个"永远通过"的检查比没有检查更糟——它制造虚假的安全感。
+{
+  const broken = [
+    '| a | b | c |',
+    '|---|---|---|',
+    '| 1 | 2 | 3 |',
+    '| 1 | 2 | 3 | 4 |', // 多一列 → 必须检出
+  ].join('\n')
+  const ok = ['| a | b |', '|---|---|', "| `zh` \\| `en` | x |"].join('\n')
+  const caught = findTableProblems(broken).length
+  const falsePositive = findTableProblems(ok).length
+  if (caught !== 1 || falsePositive !== 0) {
+    console.error(
+      `❌ check-docs 自检失败：应检出 1 处破损（实际 ${caught}），` +
+        `且不得把转义竖线误判（实际误报 ${falsePositive} 处）。`,
+    )
+    process.exit(1)
+  }
+}
+
+for (const file of files) {
+  if (!file.endsWith('.md')) continue
+  const rel = relative(ROOT, file).replace(/\\/g, '/')
+  for (const p of findTableProblems(readFileSync(file, 'utf8'))) {
+    problems.push(
+      `${rel}:${p.line}: 表格单元格数不一致（本行 ${p.cells} 列，表头 ${p.headerCells} 列，` +
+        `表头在第 ${p.headerLine} 行）——会在渲染时错位`,
+    )
+  }
+}
+
 // ── 输出 ────────────────────────────────────────────────────────────
 if (problems.length === 0) {
   console.log(`✅ 文档一致性检查通过（扫描 ${files.length} 个文件）`)

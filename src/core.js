@@ -339,11 +339,20 @@ export function buildVerifyValue({ original, rewritten, claimedKeywords } = {}) 
 export function createVerifyToolDefinition() {
   return {
     name: VERIFY_TOOL_NAME,
+    // 【描述必须与实现同步（本轮自查发现的同类漂移）】
+    // 工具 description 是模型决定"要不要用、怎么用"的依据，属于**会随判定变化而失效的文案**。
+    // 它此前只列了"数字 / 机构专名 / 职责升格 / 时间点 / 数据丢失"，
+    // 而判定后来已扩展到**整条新增**（`NOVEL_CONTENT`）、
+    // **关键词虚报回验**（`UNVERIFIED_KEYWORD_CLAIM`）、
+    // **技术名消失**（`VANISHED_TECH_TERM`）与容量单位大小写——
+    // 描述落后会误导模型对工具能力的判断（尤其"关键词会被回验"这一点，
+    // prompt 里承诺了、描述里却没写，模型可能因此虚报覆盖率）。
     description:
       '反虚构校验（确定性代码执行，非模型判断）。传入简历原文与改写后内容，' +
       '逐项比对改写是否引入了原文不存在的内容：数字、机构/专名、' +
-      '职责强度升格（把「参与」写成「主导」）、时间点改动，' +
-      '并报告原文数据的丢失情况。' +
+      '职责强度升格（把「参与」写成「主导」）、时间点改动、**凭空新增的整条经历**；' +
+      '并回验你自报的 claimedKeywords 是否真的写进了简历、' +
+      '报告原文数据的丢失与技术名消失情况。' +
       '改写简历后必须调用本工具；返回 ok=false 时必须先修正再交付。',
     parameters: VERIFY_PARAMETERS_JSON_SCHEMA,
     output: {
