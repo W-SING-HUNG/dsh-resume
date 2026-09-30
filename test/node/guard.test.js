@@ -1278,6 +1278,71 @@ describe('守卫：结构性判据不得放掉真编造（另一侧锁定）', (
     }
   })
 
+  // ── 注记位判据的两侧（真实简历实测抓出的误报 + 自测抓出的口子）────────
+  //
+  // 【误报侧】多词注记原先只认**第一个词**（只看紧邻前 3 字符）：
+  //   `GPA 3.6/4.0（Grade Point Average）`
+  //   → `Grade` 前是 `（` 放行；`Point`/`Average` 前是空格 → **判 error 并拒绝导出**。
+  // 【口子侧】改成"落在括号内就算注记"后，自测发现会放过凭空夹带的技能：
+  //   `- 熟悉 Java；` → `- 熟悉 Java（Java Virtual Machine）；`
+  //   `- 熟悉 Java；` → `- 熟悉 Java（Redis 缓存与消息队列）；`
+  // 故最终判据：括号跨度须是**纯拉丁短语**，且括号前若是拉丁缩写，
+  // 其首字母必须与该短语相符（`GPA` ← `Grade Point Average` ✅；
+  // `Java` ← `Java Virtual Machine` ✗）。
+  test('多词英文全称注记必须放行（只看紧邻三字符会误拒）', () => {
+    for (const [original, rewritten] of [
+      ['GPA 3.6/4.0，专业排名前 15%', 'GPA 3.6/4.0（Grade Point Average），专业排名前 15%'],
+      ['- GPA 3.5，专业排名前 10%；', '- GPA 3.5（Grade Point Average），专业排名前 10%；'],
+    ]) {
+      const report = verifyRewrite({ original, rewritten })
+      assert.deepEqual(
+        report.findings.filter((f) => f.severity === 'error').map((f) => f.code),
+        [],
+        `英文全称展开是合法写法，不得拒绝导出：${rewritten}`,
+      )
+    }
+  })
+
+  test('括号不得成为夹带编造技能的通道（首字母对不上则不放行）', () => {
+    for (const [original, rewritten] of [
+      ['- 熟悉 Java；', '- 熟悉 Java（Java Virtual Machine）的使用；'],
+      ['- 熟悉 Java；', '- 熟悉 Java（Redis 缓存与消息队列）的使用；'],
+      ['- 熟悉 Java；', '- 熟悉 Java（Redis、Kafka）的使用；'],
+    ]) {
+      const report = verifyRewrite({ original, rewritten })
+      assert.equal(
+        report.ok,
+        false,
+        `借括号夹带原文没有的技术名必须拦下：${rewritten}`,
+      )
+    }
+  })
+
+  test('标题加英文对照不得被判为"凭空新增整条"', () => {
+    // 标题被注记"撑"成内容单元（≥8 字），原标题因太短本不是内容单元，
+    // 于是与任何原文单元都对不上 → 曾被判 NOVEL_CONTENT 并拒绝导出。
+    const report = verifyRewrite({
+      original: '# 张伟\n## 专业技能\n- 熟悉 Java；',
+      rewritten: '# 张伟\n## 专业技能（Skills）\n- 熟悉 Java；',
+    })
+    assert.deepEqual(
+      report.findings.filter((f) => f.severity === 'error').map((f) => f.code),
+      [],
+      '给已有标题并列英文写法是 ATS 常见动作，不得拒绝导出',
+    )
+  })
+
+  test('但中文括号内容视为新增信息，不得借"剥括号"豁免', () => {
+    // 与上一条成对：剥离豁免**只对纯拉丁注记**生效。
+    // 若不加限定，`项目经历（用户增长系统）` 剥掉括号得 `项目经历`（原文有）
+    // → 编造的项目名被放过。
+    const report = verifyRewrite({
+      original: '# 张伟\n## 项目经历\n- 熟悉 Java；',
+      rewritten: '# 张伟\n## 项目经历（用户增长系统）\n- 熟悉 Java；',
+    })
+    assert.equal(report.ok, false, '中文括号里的新项目名属新增主张，必须拦下')
+  })
+
   // ── "收缩写法"不得成为"另起一行新增技能"的挡箭牌（第四次绕过后的根本约束）──
   //
   // 【为什么这组用例至关重要】

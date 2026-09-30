@@ -359,6 +359,21 @@ describe('verify_rewrite 的 error 摘要按实际 finding 生成', () => {
     assert.doesNotMatch(value.summary, /量化数据/)
   })
 
+  test('完全通过时给出干净的通过摘要（最常见的结果，必须有明确正向反馈）', () => {
+    const value = buildVerifyValue({
+      original: '- 熟悉 Java 与 MySQL；',
+      rewritten: '- 熟悉 Java 与 MySQL；',
+    })
+    assert.equal(value.errorCount, 0)
+    assert.equal(value.warnCount, 0)
+    assert.equal(value.ok, true)
+    assert.match(value.summary, /校验通过/)
+    // 不得出现"待人工确认"这类只应属于 warn 分支的措辞
+    assert.doesNotMatch(value.summary, /待人工确认/)
+    // 明细为空数组（schema 要求 issues 始终存在）
+    assert.deepEqual(value.issues, [])
+  })
+
   test('渲染出的内容包含摘要、明细与已知边界', () => {
     const verifyDef = createVerifyToolDefinition()
     const value = buildVerifyValue({

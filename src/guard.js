@@ -1621,6 +1621,22 @@ export function verifyRewrite({ original, rewritten, claimedKeywords } = {}) {
    * 若把 `：`、`、` 计入注记位，就会把"新增技能"误放行。
    * 判据收紧为：紧邻的必须是**左括号**或**斜杠**。
    *
+   * 【多词注记：只认"纯拉丁全称"，且首字母须与括号外的缩写对应】
+   *
+   * 早期只看实体**紧邻的前 3 个字符**，于是多词注记只有**第一个词**算命中：
+   *   `GPA 3.6/4.0（Grade Point Average）`
+   *   → `Grade` 前是 `（` 放行；`Point`／`Average` 前是空格 → **判 error 并拒绝导出**
+   * 而"把缩写展开成全称"与"把中文并列成英文"是同一类动作，不该只认首词。
+   *
+   * 但**不能**放宽成"落在括号内就算注记"——实测那样会开一个口子（我自己踩到）：
+   *   `- 熟悉 Java；` → `- 熟悉 Java（Java Virtual Machine）；`
+   *   把 Java 展成"Java Virtual Machine"（首字母 JVM ≠ Java）也被放行。
+   * 故多词豁免要求：括号内容是**纯拉丁短语**（无汉字、无列表分隔符/连接词），
+   * **且**括号前若是拉丁缩写，其首字母须与短语相符
+   * （`GPA` ← `Grade Point Average` ✅；`Java` ← `Java Virtual Machine` ✗）。
+   * 括号前是中文时无法做首字母校验，按 ATS 对齐放行
+   * （`超文本传输协议（HyperText Transfer Protocol）`）。
+   *
    * @param {string} unit 句子
    * @param {string} entity 实体
    * @returns {boolean} 是否处于并列注记位
@@ -1628,8 +1644,54 @@ export function verifyRewrite({ original, rewritten, claimedKeywords } = {}) {
   const isInlineAnnotation = (unit, entity) => {
     const at = indexOfToken(unit, entity)
     if (at < 0) return false
+    // ① 紧邻左括号或斜杠，且**括号前是中文术语**（中文 ↔ 英文的 ATS 并列）
+    //
+    // 【为什么要求"括号前是中文"（对抗性自测抓出的既有泄漏）】
+    // 早期只看"紧邻左括号"就放行，于是下面这类**凭空夹带技能**被放过：
+    //   `- 熟悉 Java；` → `- 熟悉 Java（Redis）的使用；`
+    // `Redis` 紧跟在 `（` 后 → 判为注记位 → 放行。而它并不是任何术语的英文写法，
+    // 只是并列了一项原文没有的技能。
+    // 真正的 ATS 并列形态是**中文术语 + 英文写法**（`超文本传输协议（HTTP）`），
+    // 括号前是**中文**。故限定括号前必须含汉字。
+    // 拉丁 → 拉丁 的写法（`GPA（Grade Point Average）`）由下面的规则 ② 处理，
+    // 且要求首字母确实对应，不放宽。
     const before = unit.slice(Math.max(0, at - 3), at)
-    return /[（(【\[/]\s*$/.test(before)
+    if (/[（(【\[/]\s*$/.test(before)) {
+      const beforeBracket = unit.slice(0, Math.max(0, at - 1))
+      const lastToken = /([\u4e00-\u9fa5A-Za-z0-9.+#-]+)\s*$/.exec(beforeBracket)
+      if (lastToken !== null && /[\u4e00-\u9fa5]/.test(lastToken[1])) return true
+      // 括号前是拉丁词：斜杠并列仍算注记位（`持续集成 / CI` 这类由中文在更前处判定）
+      if (/[/]\s*$/.test(before)) return true
+    }
+    // ② 落在某个括号跨度内 —— 仅当该跨度是"纯拉丁全称"、且首字母对得上时才认
+    const end = at + entity.length
+    for (const m of unit.matchAll(/[（(【\[]([^）)】\]]*)[）)】\]]/g)) {
+      const spanStart = m.index
+      const spanEnd = spanStart + m[0].length
+      if (at < spanStart || end > spanEnd) continue
+      const inner = m[1]
+      // 含汉字或列表分隔符 → 是"并列新项"，不是全称展开
+      if (/[\u4e00-\u9fa5]/.test(inner)) continue
+      if (/[、，,;；/\\]|以及|与|和|及/.test(inner)) continue
+      // 括号前若是拉丁缩写，要求它是该短语的首字母缩写。
+      // 注意**要跳过数字与单位**：`GPA 3.5（Grade Point Average）` 里
+      // 紧跟括号的是数值 `3.5`，缩写 `GPA` 在更前面（实测踩到）。
+      // 用循环剥离，因为"空格 + 数字 + 空格"要反复去掉。
+      let beforeSpan = unit.slice(0, spanStart)
+      let prev
+      do {
+        prev = beforeSpan
+        beforeSpan = beforeSpan.replace(/[\s\d.,%/]+\s*$/, '')
+      } while (beforeSpan !== prev)
+      const outer = /([A-Za-z][A-Za-z0-9.+#-]*)\s*$/.exec(beforeSpan)
+      const words = inner.match(/[A-Za-z]+/g) ?? []
+      if (outer !== null && words.length >= 2) {
+        const initials = words.map((w) => w[0].toUpperCase()).join('')
+        if (initials !== outer[1].toUpperCase()) continue
+      }
+      return true
+    }
+    return false
   }
   const fabricatedEntities = [...rewrittenEntities].filter((e) => !isKnownEntity(e)).sort()
 
@@ -2411,7 +2473,43 @@ export function verifyRewrite({ original, rewritten, claimedKeywords } = {}) {
   const novelCheck = detectNovelUnits(originalText, rewrittenText)
   const originalUnitsForNovel = extractContentUnits(originalText)
   const rewrittenUnitsForNovel = extractContentUnits(rewrittenText)
+  const normalizedOriginal = normalizeText(originalText)
   const survivors = novelCheck.novel.filter((unit) => {
+    // ⓪ 行内"英文对照"注记：剥掉**纯拉丁**括号后，剩余内容若原文已有 → 不是新增
+    //
+    // 【为什么必须先判这条（实测抓出的误报）】
+    // 标题加英文对照会把标题"撑"成内容单元：
+    //   `## 专业技能` → `## 专业技能（Skills）`
+    // 原文标题不足 8 字、本不是内容单元，改写后 `专业技能（Skills）` 够了，
+    // 于是与任何原文单元都对不上 → 被判"凭空新增整条" → **拒绝导出**。
+    // 而它没有新增主张，只是给已有标题并列了英文写法（ATS 常见动作）。
+    //
+    // 【⚠️ 只能剥**纯拉丁**注记（我自己第一版放宽后踩到的口子）】
+    // 若不加限定地"剥掉任意括号内容再看原文有没有"，下面这条编造会被放行：
+    //   `## 项目经历` → `## 项目经历（用户增长系统）`
+    // 剥掉括号得 `项目经历` —— 原文确实有，于是判为"注记"→ **编造被放过**。
+    // 故限定：括号内必须是**纯拉丁**（英文对照），才允许剥离后比对。
+    // 中文括号内容一律视为"新增信息"（如上面的编造项目名），照常走后续判定。
+    const latinAnnotations = [...unit.matchAll(/[（(【\[]([^）)】\]]*)[）)】\]]/g)].filter(
+      (m) => !/[\u4e00-\u9fa5]/.test(m[1]),
+    )
+    if (latinAnnotations.length > 0) {
+      const strippedUnit = unit
+        .replace(/[（(【\[][^）)】\]]*[）)】\]]/g, '')
+        .replace(/\s+/g, '')
+      if (strippedUnit !== '') {
+        const flatStripped = normalizeForSimilarity(
+          unit.replace(/[（(【\[][^）)】\]]*[）)】\]]/g, ''),
+        )
+        if (
+          flatStripped.length > 0 &&
+          normalizeForSimilarity(originalText).includes(flatStripped)
+        ) {
+          return false
+        }
+        if (normalizedOriginal.includes(strippedUnit)) return false
+      }
+    }
     const grams = charBigrams(normalizeForSimilarity(unit))
     let bestUnit = ''
     let bestScore = 0
