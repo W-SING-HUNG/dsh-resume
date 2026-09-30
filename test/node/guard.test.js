@@ -2191,8 +2191,169 @@ describe('守卫：结构性判据不得放掉真编造（另一侧锁定）', (
   // ① 表头词被判"新增技术名"：`| Category | Skills |` 里 `Category` 走 error 级
   //    而 `Skills` 恰好在意词表里所以放行 —— 分类不一致（同"栏目名漏收"一类）。
   // ② 表头**行**拍平后成内容单元（`Type Name`），与原文对不上 → NOVEL_CONTENT。
-  test('表格化技能不得误拦，且编造写进单元格仍须拦', () => {
-    const BASE = '## 专业技能\n- 熟悉 Java / Spring Boot / MySQL 的使用\n- 熟悉 Vue2、Webpack 前端技术栈\n'
+  // ── 第二轮审查抓出的三处（都由我上一轮的修复引入）────────────────────
+  //
+  // 这三条的共同教训：**修 A 的误报时引入了 B 的漏报/误报**。
+  // 每条都必须两侧锁定（编造侧 + 合法侧），不能只测修的那一侧。
+  test('表格表头行剥离不得过度（否则编造完全静默落盘）', () => {
+    // 【严重度最高的一条：编造落盘、零告警、verified=true】
+    // 早期用 `/^\s*\|[\s:|-]+\|\s*$/` 判定分隔行，它匹配**任何**
+    // 只含管道/横线/冒号/空格的行；然后无条件删掉分隔行的**上一行**。
+    // 于是下面这种（表头、数据行、分隔行、数据行）里的**数据行被当表头删掉**：
+    //     | 模块 | 说明 |
+    //     | 增长中台 | 独立负责用户增长策略设计与落地 |   ← 编造，却被删
+    //     |---|---|
+    //     | 商品列表页 | 参与开发 |
+    // → `ok=true`、`findings=[]`、导出 `verified=true`。
+    // 修法：① 分隔行必须每格 ≥3 个横线（markdown 规范）；
+    //       ② 候选表头必须是**表格首行**（上一行不是表格行）；
+    //       ③ 候选表头内容必须**不含事实主张特征**（防"模型漏写表头"）。
+    const O = '## 实习经历\n- 参与商品列表页开发工作；\n- 协助完成登录模块接口对接工作。\n'
+    const FAB = '独立负责用户增长策略设计与落地'
+    for (const [label, table] of [
+      ['表头/数据/分隔/数据', `| 模块 | 说明 |\n| 增长中台 | ${FAB} |\n|---|---|\n| 商品列表页 | 参与开发 |`],
+      ['对齐分隔行', `| 模块 | 说明 |\n| 增长中台 | ${FAB} |\n|:---|:---|\n| 商品列表页 | 参与开发 |`],
+      ['单列表格', `| 说明 |\n| ${FAB} |\n|---|\n| 参与开发 |`],
+      ['空单元格行', `| 模块 | 说明 |\n| 增长中台 | ${FAB} |\n|  |  |\n| 商品列表页 | 参与开发 |`],
+      ['模型漏写表头', `| 增长中台 | ${FAB} |\n|---|---|\n| 商品列表页 | 参与开发 |`],
+      ['单横线 | - | - |', `| 模块 | 说明 |\n| 增长中台 | ${FAB} |\n| - | - |\n| 商品列表页 | 参与开发 |`],
+    ]) {
+      const report = verifyRewrite({ original: O, rewritten: `${O}\n${table}\n` })
+      assert.equal(report.ok, false, `表格里的编造必须拦下（${label}）：${table}`)
+      assert.ok(
+        report.findings.some((f) => f.severity === 'error'),
+        `必须报 error（${label}）——不得静默`,
+      )
+    }
+    // 反向：标准表格的表头仍应剥掉（不得因收紧而误拦表格化技能）
+    const B = '## 专业技能\n- 熟悉 Java / MySQL 的使用\n'
+    for (const table of [
+      '| Category | Skills |\n|---|---|\n| 后端 | Java / MySQL |',
+      '| Category | Skills |\n|:---|---:|\n| 后端 | Java / MySQL |',
+    ]) {
+      const report = verifyRewrite({ original: B, rewritten: `${B}\n\n${table}\n` })
+      assert.deepEqual(
+        report.findings.filter((f) => f.severity === 'error').map((f) => f.code),
+        [],
+        `表格化技能不得拒绝导出：${table}`,
+      )
+    }
+  })
+
+  test('元陈述词不得成为编造的免罪牌（error 曾被降级为 warn）', () => {
+    // 【漏洞】`SOFT_META_PATTERN` 放宽为"整行任意位置匹配"后，
+    // 只要句子里出现 `以上/以下/说明：` 就整行降为 warn（不阻断导出）。
+    // 于是编造条目"带个元陈述词"即可落盘。
+    // 修法：元陈述词只是**必要条件**；同时须确认整句不含事实主张特征。
+    // 另加"文档级陈述"判据（全称量词 `均为/均可`）以区分真导语与编造断言。
+    const O = '- 参与登录模块的开发工作；\n- 负责商品列表的接口开发工作。\n'
+    for (const fab of [
+      '- 负责以下核心系统的架构设计：用户增长平台与风控中台。',
+      '- 以上项目的用户增长由本人独立负责，实现月活翻倍。',
+      '- 说明：本人独立负责风控中台的架构设计工作。',
+      '- 以下系统均由本人独立主导设计与落地。',
+    ]) {
+      const report = verifyRewrite({ original: O, rewritten: `${O}${fab}\n` })
+      assert.equal(report.ok, false, `带元陈述词的编造必须拦下：${fab}`)
+      // 具体 code 可能是 NOVEL_CONTENT，也可能被更专门的检查抓住
+      //（如 `以下系统均由本人独立主导…` 由 RESPONSIBILITY_INFLATED 报出）
+      // —— 关键是它**必须是 error，不能降级成 warn**。
+      assert.ok(
+        report.findings.some((f) => f.severity === 'error'),
+        `必须是 error 级（不得降级为 warn）：${fab}`,
+      )
+    }
+    // 反向：真导语/文档级陈述必须放行（含全称量词 `均为`）
+    for (const prose of [
+      '以下项目均为本人独立或主要参与完成。',
+      '以上项目均可提供代码与文档佐证。',
+      '以下经历均为真实经历，可按需提供证明。',
+    ]) {
+      const report = verifyRewrite({ original: O, rewritten: `${prose}\n\n${O}` })
+      assert.deepEqual(
+        report.findings.filter((f) => f.severity === 'error').map((f) => f.code),
+        [],
+        `文档级导语不得拒绝导出：${prose}`,
+      )
+    }
+  })
+
+  test('说理性旁注/落款不得被硬拒绝（用户拿不到文件类缺陷）', () => {
+    // 【第二轮审查：17/18 被拒】`isSoftExplanatory` 只认元陈述词 + 极短行，
+    // 于是常见落款/导语（`—— 详细作品集见个人主页 ——`、`本节…`）落在
+    // "默认事实主张" → error → **拒绝导出**。这是"用户拿不到文件"类缺陷。
+    // 修法：补 ④ 破折号旁注判据 + 扩充元陈述词（本节/正文/见页/作品集/清单…）。
+    const O = '- 参与登录模块的开发工作；\n- 负责商品列表的接口开发工作。\n'
+    for (const prose of [
+      '—— 详细作品集见个人主页 ——',
+      '本节列出与目标岗位最相关的经历。',
+      '（本节内容已按岗位要求精简）',
+      '附：详细项目文档可另行提供。',
+      '提示：面试时可详述上述项目细节。',
+      '（本页为第一页，共两页）',
+      '（此处省略部分早期经历）',
+      '若需补充材料，本人可随时提供。',
+      '（此处为空白页）',
+      '—— 简历正文结束，感谢阅读 ——',
+      '（因篇幅所限，此处仅列代表性经历）',
+      '（上述内容如有疑问欢迎沟通）',
+    ]) {
+      const report = verifyRewrite({ original: O, rewritten: `${O}${prose}\n` })
+      assert.deepEqual(
+        report.findings.filter((f) => f.severity === 'error').map((f) => f.code),
+        [],
+        `说理性旁注不得拒绝导出：${prose}`,
+      )
+    }
+    // ⚠️ 但破折号旁注**不得**成为编造的通道
+    const fabDash = verifyRewrite({
+      original: O,
+      rewritten: `${O}—— 独立主导集团级数据中台架构设计与落地 ——\n`,
+    })
+    assert.equal(fabDash.ok, false, '破折号包着的编造主张仍须拦下')
+  })
+
+  test('数字+单位紧邻汉字时单位仍须归一化（不得误拒）', () => {
+    // 【我修"字节跳动被当单位"时引入的回归】
+    // 我把单位正则右界改成 `(?![\w\u4e00-\u9fa5])`，但 `(?![\w])` 本来
+    // 也拦不住从 `\d` 起的匹配，所以旧右界对 `2.4s降至` 是能匹配的；
+    // 加汉字排除后"数字+单位紧邻汉字"的单位**完全不被消费**，数字裸奔：
+    //   `从2.4s缩短` → `从2400ms缩短` 被判"多出数字 240"→ **拒绝导出**。
+    // 而中文简历普遍不写空格（`从2.4s缩短`），故这是高频投递死锁。
+    // 修法：右界保持 `(?![\w])`，改在单位匹配**前遮蔽已识别的机构名**，
+    //       这样 `字节跳动` 不会被啃成 `字节`，而 `512 字节的文件` 正常。
+    for (const [original, rewritten] of [
+      ['页面加载时间从2.4s缩短至1.8s。', '页面加载时间从2400ms缩短至1800ms。'],
+      ['构建耗时5 分钟完成。', '构建耗时300s完成。'],
+      ['响应320ms降至80ms。', '响应0.32s降至0.08s。'],
+      ['耗时2.4 秒降低了。', '耗时2400 毫秒降低了。'],
+      ['支持2GB内存。', '支持2048MB内存。'],
+      ['支持512 字节的文件上传。', '支持0.5KB的文件上传。'],
+    ]) {
+      const report = verifyRewrite({ original, rewritten })
+      assert.deepEqual(
+        report.findings.filter((f) => f.severity === 'error').map((f) => f.code),
+        [],
+        `单位换算不得拒绝导出：${rewritten}`,
+      )
+    }
+    // 反向：`字节跳动` 不得被啃成单位（否则换公司名会报看不懂的数字错）
+    assert.ok(
+      ![...extractNumericTokens('- 2026.06 字节跳动公司')].some((t) => t.startsWith('size:')),
+      '`字节跳动` 不得被当成容量单位',
+    )
+    // 反向：编造数字仍须拦
+    for (const [original, rewritten] of [
+      ['页面加载时间从2.4s缩短。', '页面加载时间从3.6s缩短。'],
+      ['支持512 字节上传。', '支持1024 字节上传。'],
+      ['构建耗时5 分钟。', '构建耗时10 分钟。'],
+    ]) {
+      const report = verifyRewrite({ original, rewritten })
+      assert.equal(report.ok, false, `编造数字必须拦下：${rewritten}`)
+    }
+  })
+
+  test('表格化技能不得误拦，且编造写进单元格仍须拦', () => {    const BASE = '## 专业技能\n- 熟悉 Java / Spring Boot / MySQL 的使用\n- 熟悉 Vue2、Webpack 前端技术栈\n'
     for (const [label, table] of [
       ['Category/Skills', '| Category | Skills |\n|---|---|\n| 后端 | Java / Spring Boot / MySQL |\n| 前端 | Vue2 / Webpack |'],
       ['Type/Name', '| Type | Name |\n|---|---|\n| Backend | Java |'],

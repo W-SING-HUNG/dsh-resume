@@ -1618,19 +1618,67 @@ export function extractResponsibilityLevel(text) {
 export function stripMarkdownSyntax(input) {
   if (typeof input !== 'string') return ''
   const lines = input.split('\n')
-  // ── 先标记"表格表头行"（分隔行 `|---|---|` 的**上一行**）────────────
-  // 表头只是标签（`| Type | Name |`），不含事实主张；不剥会被判"凭空新增"
+  const isTableRow = (/** @type {string} */ l) => /^\s*\|/.test(l)
+  // ── 真正的表格分隔行 ─────────────────────────────────────────────
+  //
+  // 【为什么必须写严（两轮审查各抓出一次）】
+  // 早期用的是 `/^\s*\|[\s:|-]+\|\s*$/`——它匹配**任何只含管道/横线/冒号/空格的行**。
+  // 后果：`|  |  |`（空单元格行）、`| - | - |`（单横线）都被当成分隔行，
+  // 于是它们**上一行的真实内容被整行删掉**。
+  // 现在按 markdown 规范要求**每个单元格至少 3 个横线**
+  //（`:?-{3,}:?`），只有真正的分隔行才算。
+  const isSeparatorRow = (/** @type {string} */ l) =>
+    /^\s*\|?\s*:?-{3,}:?\s*(?:\|\s*:?-{3,}:?\s*)*\|?\s*$/.test(l) && l.includes('-')
+  // ── 标记"表格表头行" ────────────────────────────────────────────
+  //
+  // 表头只是列标签（`| Type | Name |`），不含事实主张；不剥会被判"凭空新增"
   // 并拒绝导出（实测）。数据行（分隔行之后）仍保留，故编造写进单元格依然会查。
+  //
+  // 【⛔ 必须同时要求"它是该表格的第一行"（审查抓出的**完全静默**级缺陷）】
+  // 早期只做 `separatorIndex - 1`，于是**任何**分隔行上一行都被删——
+  // 包括**数据行**。审查给的可达反例（表头、数据行、分隔行、数据行）：
+  //     | 模块 | 说明 |
+  //     | 增长中台 | 独立负责用户增长策略设计与落地 |   ← 编造，却被当表头删掉
+  //     |---|---|
+  //     | 商品列表页 | 参与开发 |
+  // 结果 `ok=true`、`findings=[]`、导出 `verified=true`——**编造完全静默落盘**。
+  // 现要求：候选表头行的**上一行不是表格行**（即它确实是表格首行）。
+  // 上面那例中它前面还有一行 `| 模块 | 说明 |`，故不会被误删。
+  //
   // ⚠️ 必须在 `.map` **之前**做（在 map 里改 `lines[i-1]` 无效——
   //    那个元素早已处理过了，实测踩到）。
+  // 【⛔ 还必须"内容像表头"才剥（堵住最后一处静默）】
+  // 若模型**漏写表头**，表格首行就是数据行，纯位置判据会把它当表头删掉：
+  //     | 增长中台 | 独立负责用户增长策略设计与落地 |   ← 编造，位置却在首行
+  //     |---|---|
+  //     | 商品列表页 | 参与开发 |
+  // → 又变成静默放行。位置无法区分"真表头"与"漏写表头的首行数据"，
+  // 但**内容可以**：表头是列标签（`Category`/`Skills`/`模块`/`说明`），
+  // 不含数字、机构名、技术专名、职责动词；而数据行常含这些。
+  // 故加一条内容判据：候选表头**必须不含任何事实主张特征**。
+  // 含特征时**保留**该行，让它照常参与校验（宁可误报，不可静默）。
+  const looksLikeHeaderRow = (/** @type {string} */ l) => {
+    if (/\d/.test(l)) return false // 数字（量化结果/日期）
+    if (extractChineseOrgNames(l).size > 0) return false // 机构名
+    if (extractLatinProperNouns(l).size > 0) return false // 技术专名
+    if (extractResponsibilityLevel(l).maxLevel > 0) return false // 职责动词
+    return true
+  }
   const headerRows = new Set()
   lines.forEach((line, i) => {
-    if (/^\s*\|[\s:|-]+\|\s*$/.test(line) && i > 0) headerRows.add(i - 1)
+    if (!isSeparatorRow(line) || i === 0) return
+    const candidate = i - 1
+    // 候选表头必须是表格行，且它**不是**表格的第二行及以后
+    if (!isTableRow(lines[candidate])) return
+    if (candidate > 0 && isTableRow(lines[candidate - 1])) return
+    // 内容必须像表头（否则保留该行，让编造照常被查出）
+    if (!looksLikeHeaderRow(lines[candidate])) return
+    headerRows.add(candidate)
   })
   return lines
     .map((line, i) => {
       if (headerRows.has(i)) return '' // 表格表头行
-      if (/^\s*\|[\s:|-]+\|\s*$/.test(line)) return '' // 表格分隔行
+      if (isSeparatorRow(line)) return '' // 表格分隔行
       if (/^\s*\|/.test(line)) {
         // 表格数据行 → 拍平成单元格文字
         return line
@@ -1834,18 +1882,27 @@ export function extractNumericTokens(text) {
   // 否则 `2400ms` 会被 `s`... 之类的短分支截断。
   // 另外裸 `s` / `b` / `h` 必须列出（实测漏掉裸 `s` 导致 `2.4s` 完全不被归一化）。
   //
-  // ⚠️ 右界必须排除**汉字**，不能只写 `(?![\w])`（实测抓出的误报）。
+  // 【右界为什么只能用 `(?![\w])`，不能加汉字排除】
+  // `字节`（bytes）是单位，而 `字节跳动`（ByteDance）以它开头；`\w` 不含汉字，
+  // 于是 `- 2026.06 字节跳动公司` 会被啃成「2026.06 字节」→ `size:2026.06`。
   //
-  // 【`\w` 不含汉字，于是中文词会被啃成单位】
-  // `字节`（bytes）是单位，而 `字节跳动`（ByteDance）以它开头：
-  //   `- 2026.06 字节跳动公司` → 匹配成「2026.06 字节」→ 归一化为
-  //   `size:2026.06`。后果是**换公司名**（`某互联网公司 → 字节跳动公司`）
-  //   被报成"编造数字：size:2026.06"，用户看到一条听不懂的告警；
-  //   更糟的是日期 token `2026.06` 被吞进 unitConsumed，日期检查同时失灵。
-  // 故右界改为"后面不能是字母/数字，也不能是汉字"。
+  // 我一度把右界改成 `(?![\w\u4e00-\u9fa5])` 来堵它，**但那是错的**：
+  // 中文简历里"数字+单位紧邻汉字"是**极常见**写法——
+  //   `从2.4s缩短`、`5 分钟完成`、`512 字节的文件`、`2GB内存`
+  // 加汉字排除后这些单位**完全不被消费**，数字裸奔进比对，导致
+  //   `从2.4s缩短` → `从2400ms缩短` 被判"多出数字 240"→ **拒绝导出**。
+  // 即"用一个误拒换一个文案问题"，方向反了：本项目**误拒是最坏结果**。
+  //
+  // 正解见下方 `orgMasked`：先把**已识别的机构名**遮掉，`字节` 就不会
+  // 残留在 `字节跳动` 里；右界保持 `(?![\w])`，两边都不误伤。
   const unitRe =
-    /(\d[\d,]*(?:\.\d+)?)\s*(ms|毫秒|secs?|秒|mins?|分钟|hrs?|小时|bytes?|字节|kb|mb|gb|s|h|b)(?![\w\u4e00-\u9fa5])/gi
-  for (const m of masked.matchAll(unitRe)) {
+    /(\d[\d,]*(?:\.\d+)?)\s*(ms|毫秒|secs?|秒|mins?|分钟|hrs?|小时|bytes?|字节|kb|mb|gb|s|h|b)(?![\w])/gi
+  // 单位匹配前先遮蔽机构名：`字节跳动公司` → 占位符，避免 `字节` 被当单位。
+  let orgMasked = masked
+  for (const org of extractChineseOrgNames(masked)) {
+    orgMasked = orgMasked.split(org).join(' ')
+  }
+  for (const m of orgMasked.matchAll(unitRe)) {
     const family = UNIT_FAMILIES.find(([re]) => re.test(m[2]))
     if (family === undefined) continue
     const value = Number(m[1].replace(/,/g, ''))
@@ -3439,7 +3496,55 @@ export function verifyRewrite({ original, rewritten, claimedKeywords } = {}) {
    * 其余一律按事实主张处理（error）——保守侧，与"宁可误拦不放行编造"一致。
    */
   const SOFT_META_PATTERN =
-    /本简历|本人(?:独立)?(?:撰写|完成)|以上|以下|如上|如下|注[：:]|说明[：:]|详见|参见|按.{0,6}排列|真实有效|属实|佐证|可提供|仅供参考|未完待续/
+    /本简历|本人(?:独立)?(?:撰写|完成)|以上|以下|如上|如下|注[：:]|说明[：:]|详见|参见|按.{0,6}排列|真实有效|属实|佐证|可提供|仅供参考|未完待续|附[：:]|提示[：:]|此处|本页|篇幅|另行|随时提供|欢迎沟通|本节|正文|结束|感谢阅读|见(?:页|作品集|附件|主页|后)|作品集|清单/
+  /**
+   * 破折号包起来的旁注（`—— 详细作品集见个人主页 ——`）。
+   *
+   * 【为什么单列一条】这类"排版性旁注"常不带任何元陈述词
+   *（如 `—— 简历正文结束，感谢阅读 ——`），但用**破折号对包夹**这一
+   * 纯排版特征即可识别。它们不主张任何事实，放行是安全的。
+   */
+  const isDashAnnotation = (/** @type {string} */ t) =>
+    /^\s*[—–-]{2,}.{0,60}[—–-]{2,}\s*$/.test(t)
+  /**
+   * 该单元是否**看起来像事实主张**（与 {@link isSoftExplanatory} 互为反向）。
+   *
+   * 【为什么必须补这一条（审查抓出的 error→warn 降级漏洞）】
+   * `SOFT_META_PATTERN` 放宽为"整行任意位置匹配"后，**只要句子里出现
+   * `以上/以下/说明：` 等词，整行就被当说明性文字降为 warn**——
+   * 而 warn 不阻断导出。于是编造条目只要"带个元陈述词"就能落盘：
+   *   `- 负责以下核心系统的架构设计：用户增长平台与风控中台。`
+   *   `- 以上项目的用户增长由本人独立负责，实现月活翻倍。`
+   *   `- 说明：本人独立负责风控中台的架构设计工作。`
+   * 实测这三条都只报 warn → `exportResume` 写出文件、`verified=true`。
+   *
+   * 正解：元陈述词**只是必要条件，不是充分条件**。
+   * 一句话只有在"同时不含事实主张特征"时才算说明性文字。
+   */
+  /**
+   * **文档级陈述**的判据：句中出现"全称量词 + 职责动词"的搭配。
+   *
+   * 【为什么需要它（区分真导语与编造主张）】
+   * 两者都可能含职责动词，但**作用对象不同**：
+   *   `以下项目均为本人独立或主要参与完成。`   ← 对**整份简历**的概括（真导语）
+   *   `- 负责以下核心系统的架构设计：…`        ← 对**某件具体工作**的主张（编造）
+   * 前者的职责动词被全称量词（`均为/均可/皆/全部/所有`）罩着，
+   * 说的是"下列各条都属于某种状态"，而非"我做了某件新事"。
+   * 后者是及物断言，带具体对象（系统名/成果）。
+   * 故"含全称量词"是文档级陈述的可靠结构信号。
+   */
+  const DOC_LEVEL_QUANTIFIER = /(?:均|皆|都|全部|所有|每一?)(?:为|可|由|系|属)?/
+  const looksLikeDocLevelStatement = (/** @type {string} */ t) =>
+    DOC_LEVEL_QUANTIFIER.test(t) && SOFT_META_PATTERN.test(t)
+  const looksLikeFactualClaim = (/** @type {string} */ t) => {
+    // 文档级陈述（`均为…完成`）不是"某件具体工作"的主张
+    if (looksLikeDocLevelStatement(t)) return false
+    if (/\d/.test(t)) return true // 数字（量化结果/日期）
+    if (extractChineseOrgNames(t).size > 0) return true // 机构名
+    if (extractLatinProperNouns(t).size > 0) return true // 技术专名
+    if (extractResponsibilityLevel(t).maxLevel > 0) return true // 职责动词
+    return false
+  }
   const isSoftExplanatory = (/** @type {string} */ unit) => {
     const t = unit.trim()
     // ① 纯结构符号（水平线、围栏、表格分隔行的残留）
@@ -3453,9 +3558,14 @@ export function verifyRewrite({ original, rewritten, claimedKeywords } = {}) {
     //   `以上项目均可提供代码与文档佐证。`      ✘ 被拒
     // 枚举"以上+什么名词"永远列不全（与本文件反复出现的教训同源）。
     // 改为只认前缀 `以上/以下/本简历/注：/说明：` 等**元陈述标记**即可。
-    if (SOFT_META_PATTERN.test(t)) return true
+    //
+    // ⚠️ 但**光有元陈述词不够**：还得确认整句不含事实主张特征，
+    //    否则"给编造加个'以下'前缀"就能降级为 warn（实测漏洞）。
+    if (SOFT_META_PATTERN.test(t) && !looksLikeFactualClaim(t)) return true
     // ③ 极短且无实义（单字/双字，多为编号残留）
     if (t.replace(/[\s\p{P}]/gu, '').length <= 2) return true
+    // ④ 破折号旁注（`—— 完整项目清单见作品集 ——`）：纯排版，不主张事实
+    if (isDashAnnotation(t) && !looksLikeFactualClaim(t)) return true
     return false
   }
   const blockingSurvivors = survivors.filter((u) => !isSoftExplanatory(u))
