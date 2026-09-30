@@ -1295,16 +1295,18 @@ describe('守卫：结构性判据不得放掉真编造（另一侧锁定）', (
   // 其余一切括号内容都按新增主张处理。
   test('括号不得成为夹带编造技能的通道（严格版锁定）', () => {
     for (const [original, rewritten] of [
-      // 中文在前的编造：必须拦（放宽版会全部放过）
+      // 中文在前的编造：必须拦
       ['- 熟悉数据库的使用；', '- 熟悉数据库（Random Keyspace）的使用；'],
       ['- 熟悉数据库的使用；', '- 熟悉数据库（Redis Cluster）的使用；'],
       ['- 熟悉数据库的使用；', '- 熟悉数据库（redis cluster）的使用；'],
-      // 拉丁在前的编造
-      ['- 熟悉 Java；', '- 熟悉 Java（Java Virtual Machine）的使用；'],
+      // 拉丁在前的编造（同一件事，不得因括号里词少就放行）
+      ['- 熟悉 Java；', '- 熟悉 Java（Redis）的使用；'],
+      ['- 熟悉 Java；', '- 熟悉 Java（Redis Cluster）的使用；'],
       ['- 熟悉 Java；', '- 熟悉 Java（Redis、Kafka）的使用；'],
       // 标题里夹带（中文括号内容）
       ['# 张伟\n## 项目经历\n- 熟悉 Java；', '# 张伟\n## 项目经历（2024）\n- 熟悉 Java；'],
       ['# 张伟\n## 项目经历\n- 熟悉 Java；', '# 张伟\n## 项目经历（用户增长系统）\n- 熟悉 Java；'],
+      ['# 张伟\n## 项目经历\n- 熟悉 Java；', '# 张伟\n## 项目经历（Redis）\n- 熟悉 Java；'],
     ]) {
       const report = verifyRewrite({ original, rewritten })
       assert.equal(
@@ -1315,22 +1317,32 @@ describe('守卫：结构性判据不得放掉真编造（另一侧锁定）', (
     }
   })
 
-  test('已知残余泄漏：中文在后、拉丁短语在括号内（仅 warn，不阻断）', () => {
-    // 这一形态当前**只报 warn**（可导出），是已声明的残余风险：
+  test('同一件事不得因括号里的词数不同而一放一拦（判定一致性）', () => {
+    // 【实测抓出的既有不一致】同样声称原文没有的 Redis：
+    //   `- 熟悉 Java（Redis）的使用；`        → 曾放行
+    //   `- 熟悉 Java（Redis Cluster）的使用；` → 曾拦住
+    // 只因多写一个词。根因是"紧邻左括号即放行"没要求括号前是中文。
+    // 现统一：括号前是拉丁词时必须满足"全大写缩写 + 其展开"，否则拦住。
+    for (const annotated of ['（Redis）', '（Redis Cluster）', '（Redis 缓存与消息队列）']) {
+      const report = verifyRewrite({
+        original: '- 熟悉 Java；',
+        rewritten: `- 熟悉 Java${annotated}的使用；`,
+      })
+      assert.equal(report.ok, false, `声称原文没有的 Redis 必须拦下：${annotated}`)
+    }
+  })
+
+  test('残余泄漏已收口：中文在后、拉丁短语在括号内现在会被拦', () => {
+    // 这一形态**曾经只报 warn**（可导出），属已声明的残余风险：
     //   `- 熟悉 Java；` → `- 熟悉 Java（Redis 缓存与消息队列）的使用；`
-    // 它在文本上与"把中文术语并列英文写法"高度相似（括号内是拉丁短语+中文），
-    // 收紧它会连带误伤大量合法注记。
-    // 本用例把**现状**固定下来：一旦有人改进判据使其变 error，此断言会失败，
-    // 从而提醒同步更新 CHANGELOG 与 GUARD_LIMITATIONS。
+    // 根因是"紧邻左括号即算注记位"没要求括号前是**中文**。
+    // 现要求括号前为中文术语，故该形态被正确拦下（与 `（Redis）` 判定一致）。
     const report = verifyRewrite({
       original: '- 熟悉 Java；',
       rewritten: '- 熟悉 Java（Redis 缓存与消息队列）的使用；',
     })
-    assert.equal(report.ok, true, '当前为已知残余泄漏（仅 warn）')
-    assert.ok(
-      report.findings.some((f) => f.code === 'AMBIGUOUS_NEW_TERM'),
-      '至少必须报出待确认，不得静默',
-    )
+    assert.equal(report.ok, false, '声称原文没有的 Redis 必须拦下')
+    assert.ok(report.findings.some((f) => f.code === 'FABRICATED_ENTITY'))
   })
 
   test('合法的中文↔英文并列注记必须放行', () => {
@@ -1381,7 +1393,6 @@ describe('守卫：结构性判据不得放掉真编造（另一侧锁定）', (
       // Java 不是缩写（带小写字母），给它挂"全称"只可能是编造
       ['- 熟悉 Java；', '- 熟悉 Java（Just Another Vague Abbreviation）；'],
       ['- 熟悉 Java；', '- 熟悉 Java（Java Application Virtual Architecture）；'],
-      ['- 熟悉 Java；', '- 熟悉 Java（Java Virtual Machine）的使用；'],
       // 括号内是原文没有的技能
       ['- 熟悉数据库的使用；', '- 熟悉数据库（Random Keyspace）的使用；'],
       ['- 熟悉数据库的使用；', '- 熟悉数据库（Redis Cluster）的使用；'],
@@ -1394,22 +1405,48 @@ describe('守卫：结构性判据不得放掉真编造（另一侧锁定）', (
     }
   })
 
-  // ── 已知误报（严格侧的代价，如实锁定）─────────────────────────────
+  test('「已有技术名 + 英文全称」降为 warn（歧义档，不阻断但必须提示）', () => {
+    // 【为什么这一条不是 error】它既不像 `Java（Redis）` 那样**明确夹带新技术**
+    // （括号内全是英文描述词，未点名别的技术名），
+    // 也不像 `Java（Just Another …）` 那样首字母对不上。
+    // 文本上无法区分"给已有技术名补全称"与"顺手多写个相关词"，
+    // 故按歧义档处理：**报 warn 让人确认，但不阻断交付**
+    //（若判 error，模型做 ATS 对齐时写 `Java（Java Virtual Machine）`
+    // 就会拿不到文件）。
+    for (const [original, rewritten] of [
+      ['- 熟悉 Java；', '- 熟悉 Java（Java Virtual Machine）的使用；'],
+      ['- 熟悉 Redis；', '- 熟悉 Redis（Remote Dictionary Server）的使用；'],
+    ]) {
+      const report = verifyRewrite({ original, rewritten })
+      assert.equal(report.ok, true, `此类全称展开不应阻断交付：${rewritten}`)
+      assert.ok(
+        report.findings.some((f) => f.code === 'AMBIGUOUS_NEW_TERM'),
+        '必须报出待确认，不得静默放过',
+      )
+    }
+  })
+
+  // ── 中文术语 + 英文全称展开（误报已修）───────────────────────────────
   //
-  // 括号前是**中文**时无法做首字母校验，故一律按"新增主张"处理。
-  // 代价是下面这条合法写法被误拒——它是**已知误报**，不是行为正确。
-  // 用测试明确记录（而非假装正确）：将来找到兼顾两侧的判据时，
-  // 这条断言会失败，从而提醒同步更新 CHANGELOG 与 GUARD_LIMITATIONS。
-  test('已知误报：中文术语 + 英文全称展开（暂接受误拒）', () => {
-    const report = verifyRewrite({
-      original: '- 熟悉超文本传输协议的使用；',
-      rewritten: '- 熟悉超文本传输协议（HyperText Transfer Protocol）的使用；',
-    })
-    assert.equal(
-      report.ok,
-      false,
-      '当前判定为误报（已知）——若此断言失败，说明判据已改进，请同步更新本用例与 CHANGELOG',
-    )
+  // 此前这是一条**已知误报**：括号前是中文时"无法做首字母校验"，
+  // 于是 `超文本传输协议（HyperText Transfer Protocol）` 被拒。
+  // 现已修好——判据改为"括号前是**中文术语**即视为 ATS 并列"（规则 ①），
+  // 不再要求括号内满足"全大写缩写 + 展开"（那是对拉丁前缀的要求）。
+  test('中文术语 + 英文全称展开必须放行', () => {
+    for (const [original, rewritten] of [
+      ['- 熟悉超文本传输协议的使用；', '- 熟悉超文本传输协议（HyperText Transfer Protocol）的使用；'],
+      ['- 实现断点续传；', '- 实现断点续传（Resumable Upload）；'],
+      ['- 熟悉负载均衡的使用；', '- 熟悉负载均衡（Load Balancing）的使用；'],
+      ['- 熟悉面向对象的使用；', '- 熟悉面向对象（Object Oriented）的使用；'],
+      ['- 熟悉结构化查询语言的使用；', '- 熟悉结构化查询语言（Structured Query Language）的使用；'],
+    ]) {
+      const report = verifyRewrite({ original, rewritten })
+      assert.deepEqual(
+        report.findings.filter((f) => f.severity === 'error').map((f) => f.code),
+        [],
+        `中文术语并列英文全称是 ATS 常规动作，不得拒绝导出：${rewritten}`,
+      )
+    }
   })
 
   // ── 标题 + 通用英文词注记（误报已修，且不得借此夹带）──────────────────
@@ -1532,6 +1569,70 @@ describe('守卫：结构性判据不得放掉真编造（另一侧锁定）', (
       const report = verifyRewrite({ original, rewritten })
       assert.equal(report.ok, false, `序号化不得掩护编造数字：${rewritten}`)
       assert.ok(report.findings.some((f) => f.code === 'FABRICATED_NUMBER'))
+    }
+  })
+
+  // ── markdown 排版语法不是"新增内容"（真实简历实测抓出的一批死锁）──────
+  //
+  // 【为什么】下列都是**纯排版动作**，却会把 markdown 语法本身当成新内容：
+  //   · 加链接 `[文字](url)` → `https` 被当成新增技术名 → 拒绝导出
+  //   · 表格化 `| a | b |`   → `| 类别 | 内容 |` 被判"凭空新增"
+  //   · 加水平线 `---`、斜体说明 `*…*`
+  // 实测这批动作让真实简历误报率达 25%。修法：内容单元比对前用
+  // `stripMarkdownSyntax` 剥离语法（只在这一处，避免影响"技术名是否存在"判定）。
+  test('markdown 排版语法（链接/表格/水平线/斜体）不得被判为新增内容', () => {
+    for (const [original, rewritten] of [
+      ['GitHub：github.com/liuyang', 'GitHub：[github.com/liuyang](https://github.com/liuyang)'],
+      ['- 熟悉 Java\n- 熟悉 MySQL', '| 类别 | 内容 |\n|---|---|\n| 后端 | Java |\n| 数据 | MySQL |'],
+      ['# 张伟\n- 熟悉 Java；', '# 张伟\n\n---\n\n- 熟悉 Java；'],
+      ['- 熟悉 Java；', '- **熟悉 Java**；'],
+      ['- 熟悉 Java；', '- `熟悉 Java`；'],
+      ['- 熟悉 Java；', '  - 熟悉 Java；'],
+      ['- 支持 2GB 大文件；', '- 支持 2 GB 大文件；'],
+      ['- 电话：136-0000-0000', '- 电话：+86-136-0000-0000'],
+    ]) {
+      const report = verifyRewrite({ original, rewritten })
+      assert.deepEqual(
+        report.findings.filter((f) => f.severity === 'error').map((f) => f.code),
+        [],
+        `纯排版动作不得拒绝导出：${rewritten}`,
+      )
+    }
+  })
+
+  test('但标题行新增仍按事实主张拦下（排版豁免不得掩护编造章节）', () => {
+    // 反向锁定：`stripMarkdownSyntax` 会剥掉 `##`，但"标题行多了一个章节/项目"
+    // 是硬性事实主张，必须仍判 error（成对用例）。
+    for (const annotated of ['用户增长系统', '2024', 'Redis']) {
+      const report = verifyRewrite({
+        original: '# 张伟\n## 项目经历\n- 熟悉 Java；',
+        rewritten: `# 张伟\n## 项目经历（${annotated}）\n- 熟悉 Java；`,
+      })
+      assert.equal(report.ok, false, `标题行新增「${annotated}」必须拦下`)
+    }
+  })
+
+  test('正文里的说明性文字降为 warn（不含事实主张，不阻断交付）', () => {
+    // 落款、章节导语这类新增文字不含数字/机构/技术名/职责主张，
+    // 判 error 只会让用户拿不到文件。降为 warn：提示但不阻断。
+    // 注意：文本需 ≥ 8 字才会成为"内容单元"（短行本就不参与逐条比对，
+    // 因此也不会报出）——这里用足够长的落款与导语。
+    for (const [original, rewritten] of [
+      [
+        '## 项目经历\n- 使用 Java 开发订单系统，负责核心模块设计与实现；',
+        '## 项目经历\n- 使用 Java 开发订单系统，负责核心模块设计与实现；\n\n*本简历内容均由本人独立撰写，真实有效。*',
+      ],
+      [
+        '## 项目经历\n- 使用 Java 开发订单系统，负责核心模块设计与实现；',
+        '## 项目经历\n> 以下经历按时间倒序排列，均可提供证明材料。\n- 使用 Java 开发订单系统，负责核心模块设计与实现；',
+      ],
+    ]) {
+      const report = verifyRewrite({ original, rewritten })
+      assert.equal(report.ok, true, `说明性文字不应阻断交付：${rewritten}`)
+      assert.ok(
+        report.findings.some((f) => f.code === 'NOVEL_CONTENT' && f.severity === 'warn'),
+        '必须报出 warn，不得静默',
+      )
     }
   })
 

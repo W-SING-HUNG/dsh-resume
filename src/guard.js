@@ -306,6 +306,116 @@ const EN_STOPWORDS = new Set(
     'qualification',
     'qualifications',
     'accomplishments',
+    // 【计量单位不是技术名（实测抓出的死锁）】
+    // `2GB` 与 `2 GB` 是同一数值的两种写法（中间加空格纯属排版），
+    // 但加空格后 `GB` 变成**独立 token**，于是被当成"新增的技术名"
+    // → 判 FABRICATED_ENTITY → **拒绝导出**。
+    // 实测数字侧本来已做归一化（两者都得 `size:2147483648`），
+    // 只有专名侧漏了，故在此补上。
+    // 安全性：单位词本身不含技术栈主张；真正被改动的数值仍由数字检查拦下
+    // （实测 `2 GB` → `4 GB` 依然判 FABRICATED_NUMBER）。
+    'kb',
+    'mb',
+    'gb',
+    'tb',
+    'pb',
+    'ms',
+    'sec',
+    'secs',
+    'min',
+    'mins',
+    'hr',
+    'hrs',
+    'byte',
+    'bytes',
+    'bit',
+    'bits',
+    // 【普通英文名词/形容词/动词（真实简历实测抓出的误报）】
+    // 中文术语并列英文写法时，括号内是**英文翻译**：
+    //   `断点续传（Resumable Upload）`、`超文本传输协议（Hyper Text Transfer Protocol）`、
+    //   `负载均衡（Load Balancing）`、`面向对象（Object Oriented）`
+    // 而这些常见英文词原本不在词表里 → 被判为"专有技术名" → **拒绝导出**。
+    // 与"常见简历栏目名漏收"是同一类问题：词表覆盖不全导致分类不一致。
+    // 判据：它们都是**普通英文词**（任何词典都有），不含技术栈主张。
+    // 注意**不收** `Redis`/`Kubernetes` 这类专有技术名（那才是要拦的编造）。
+    'resumable',
+    'upload',
+    'download',
+    'hyper',
+    'text',
+    'transfer',
+    'protocol',
+    'load',
+    'balancing',
+    'balance',
+    'continuous',
+    'integration',
+    'object',
+    'oriented',
+    'agile',
+    'development',
+    'develop',
+    'unit',
+    'testing',
+    'test',
+    'version',
+    'control',
+    'control',
+    'concurrent',
+    'concurrency',
+    'parallel',
+    'distributed',
+    'distribute',
+    'virtual',
+    'machine',
+    'grade',
+    'point',
+    'average',
+    'layer',
+    'simple',
+    'query',
+    'queries',
+    'structured',
+    'language',
+    'framework',
+    'frameworks',
+    'service',
+    'services',
+    'model',
+    'models',
+    'pattern',
+    'patterns',
+    'system',
+    'systems',
+    'platform',
+    'platforms',
+    'solution',
+    'solutions',
+    'module',
+    'modules',
+    'component',
+    'components',
+    'function',
+    'functions',
+    'feature',
+    'features',
+    'process',
+    'processes',
+    'workflow',
+    'pipeline',
+    // 「技术名（英文全称）」里的通用词——与 Java Virtual Machine 同类。
+    //
+    // ⚠️ **只收"几乎不可能单独构成技术栈主张"的描述性词**。
+    // 实测教训：我第一版把 `cluster`/`cache`/`server`/`queue`/`stream` 等
+    // 一并收进来，结果 `数据库（Redis Cluster）` 从"拦住"变成"放行"——
+    // 因为 `Cluster` 变泛指后，括号内只剩 `Redis` 一个专名，
+    // 而它被"中文术语并列英文"规则放行了（**净亏损，已移除这批词**）。
+    // 保留的是只在"英文全称"语境出现的词（`Java Virtual Machine`、
+    // `Remote Dictionary Server`），它们不会让某个技术名单独漏过。
+    'remote',
+    'dictionary',
+    'virtual',
+    'machine',
   ].map((w) => w.toLowerCase()),
 )
 
@@ -1151,6 +1261,58 @@ export function extractResponsibilityLevel(text) {
  * @param {unknown} input 任意输入
  * @returns {string} 归一化文本（非字符串输入返回空串）
  */
+/**
+ * 剥离 markdown **排版语法**，只保留文字内容。
+ *
+ * 【存在理由（真实简历实测抓出的一批死锁）】
+ * 下列都是**纯排版动作**，却会把 markdown 语法本身当成"原文没有的内容"：
+ *   · 加引用块 `> 说明`         → `> 以下为在校期间荣誉` 被判"凭空新增"
+ *   · 加链接 `[文字](url)`      → 整条被判新增（`https`、`com` 等成了"新专名"）
+ *   · 表格化 `| a | b |`        → `| 类别 | 内容 |` 与分隔行 `|---|---|` 被判新增
+ *   · 加水平线 `---`、斜体说明 `*…*`
+ * 实测这批动作让真实简历的误报率达到 25%，全部是"用户拿不到文件"。
+ *
+ * 【为什么单独一个函数，而不是塞进 `normalizeText`】
+ * `normalizeText` 被**所有**检查共用，包括"某技术名是否仍出现在原文里"
+ * 这类**存在性**判定。在那里剥离语法有风险（若剥离不当会把技术名一起删掉，
+ * 反而误判"技术名消失"）。而这个函数只用于**内容单元比对**
+ * （判断"某条改写是否与原文任何内容都对不上"），
+ * 剥离语法后只会让比对更准确，不会造成"内容凭空消失"的误判。
+ *
+ * @param {string} input 原始文本
+ * @returns {string} 去除 markdown 排版语法后的纯文字
+ */
+export function stripMarkdownSyntax(input) {
+  if (typeof input !== 'string') return ''
+  return input
+    .split('\n')
+    .map((line) => {
+      if (/^\s*\|[\s:|-]+\|\s*$/.test(line)) return '' // 表格分隔行
+      if (/^\s*\|/.test(line)) {
+        // 表格数据行 → 拍平成单元格文字
+        return line
+          .replace(/^\s*\||\|\s*$/g, '')
+          .split('|')
+          .map((c) => c.trim())
+          .filter(Boolean)
+          .join(' ')
+      }
+      if (/^\s*(-{3,}|\*{3,}|_{3,})\s*$/.test(line)) return '' // 水平线
+      if (/^\s*>\s?/.test(line)) return line.replace(/^\s*>\s?/, '') // 引用块
+      return line
+    })
+    .join('\n')
+    .replace(/\[([^\]]*)\]\([^)]*\)/g, '$1') // 链接 → 链接文字
+    .replace(/`([^`]*)`/g, '$1') // 行内代码 → 内容
+    .replace(/\*{1,3}([^*\n]+)\*{1,3}/g, '$1') // 粗体/斜体 → 文字
+    .replace(/_{1,3}([^_\n]+)_{1,3}/g, '$1')
+}
+
+/**
+ * 归一化文本：统一换行，便于逐行处理。
+ * @param {unknown} input 任意输入
+ * @returns {string} 归一化文本（非字符串输入返回空串）
+ */
 export function normalizeText(input) {
   if (typeof input !== 'string') return ''
   return (
@@ -1242,7 +1404,13 @@ export function extractNumericTokens(text) {
   // "给电话加连字符"这种纯排版动作会被判成"多出数字 0000、138"，
   // 合法改写被拒。号码是事实字段，写法差异不该算编造。
   // 用占位符替换掉，避免后面被当普通数字重复抽取。
-  const contactRe = /(?<!\d)(1[3-9]\d)[-\s]?(\d{4})[-\s]?(\d{4})(?!\d)/g
+  //
+  // 【国际区号也属"写法"（实测抓出的死锁）】
+  // `136-0000-0000` → `+86-136-0000-0000` 时，`86` 被判为"新增数字"。
+  // 但区号是号码的**国际写法**，号码本体一字未变。故允许可选的 `+NN` 前缀，
+  // 且归一化时**只记号码本体**（10 位），使两种写法比对相等。
+  // 放宽是安全的：号码本体若被改动（如 136 → 138），比对仍会不同。
+  const contactRe = /(?:\+\d{1,3}[-\s]?)?(?<!\d)(1[3-9]\d)[-\s]?(\d{4})[-\s]?(\d{4})(?!\d)/g
   const masked = normalized.replace(contactRe, (_full, a, b, c) => {
     out.add(`${a}${b}${c}`)
     return ' '
@@ -1378,7 +1546,25 @@ export function extractLatinProperNouns(text) {
   const out = new Set()
   const src = normalizeText(text)
   if (src === '') return out
-  for (const rawLine of src.split('\n')) {
+  // ── 先剥离 URL / 邮箱（实测抓出的误报）──────────────────────────────
+  //
+  // 【为什么】URL 与邮箱地址不是技术栈主张，但会被当成专名：
+  //   `博客：https://blog.example.com/posts` → 提取到 `https`
+  //   `邮箱：liuyang@example.com`            → 提取到 `liuyang`
+  // 后果：把 `github.com/liuyang` 加上链接语法（
+  // `[github.com/liuyang](https://github.com/liuyang)`）这种**纯排版动作**
+  // 会因新增 `https` 而被判 `FABRICATED_ENTITY` 并**拒绝导出**。
+  // 剥离是安全的：URL 里的真实技术信息（如 `github.com`）本就不是技能主张；
+  // 而"新增了一个没做过的项目仓库"由 URL 文本本身的比对负责（仍会报 warn）。
+  // ⚠️ **顺序有关**：必须先剥**邮箱**，再剥带协议的 URL，最后剥裸域名。
+  // 反例（实测踩到）：若先跑"裸域名"规则，`liuyang@example.com` 中的
+  // `example.com` 会先被吃掉，剩下 `liuyang@`，于是邮箱规则再也匹配不上，
+  // `liuyang` 反而被当成专名提取出来。
+  const withoutUrls = src
+    .replace(/\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b/g, ' ') // ① 邮箱（先）
+    .replace(/[A-Za-z][A-Za-z0-9+.-]*:\/\/[^\s)\]<>"'，。；、）】]+/g, ' ') // ② 带协议的 URL
+    .replace(/\b[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.(?:com|cn|org|net|io|dev|co|edu|gov|me|info|xyz|top)\b(?:\/[^\s)\]<>"'，。；、）】]*)?/gi, ' ') // ③ 裸域名
+  for (const rawLine of withoutUrls.split('\n')) {
     const line = rawLine.replace(/^[\s>*\-+#]+/, '').replace(/\*\*/g, '')
     const words = line.split(/[^A-Za-z0-9.+#/-]+/).filter((w) => w !== '')
     const cjkLine = containsHan(line)
@@ -1676,9 +1862,27 @@ export function verifyRewrite({ original, rewritten, claimedKeywords } = {}) {
   const isInlineAnnotation = (unit, entity) => {
     const at = indexOfToken(unit, entity)
     if (at < 0) return false
-    // ① 紧邻左括号或斜杠：单词注记的常见形态（`超文本传输协议（HTTP）`）
+    // ① 紧邻左括号或斜杠：**中文术语并列英文写法**的常见形态。
+    //
+    // 【为什么要求"括号前是中文"（对抗性自测抓出的既有不一致）】
+    // 早期只看"紧邻左括号"就放行，于是同一件事的判定取决于括号里写了几个词：
+    //   `- 熟悉 Java；` → `- 熟悉 Java（Redis）的使用；`          ← 放行
+    //   `- 熟悉 Java；` → `- 熟悉 Java（Redis Cluster）的使用；`   ← 拦住
+    // 两者都声称了原文没有的 Redis，只因多写一个词就一放一拦。
+    // 且前者（括号前是拉丁词 `Java`）根本不是"中文术语并列英文"形态。
+    // 现要求括号前是**中文术语**（`超文本传输协议（HTTP）`），
+    // 这才是真正的 ATS 并列动作；括号前是拉丁词时改由规则 ② 处理
+    // （要求全大写缩写 + 其展开，`Redis` 不满足）。
     const before = unit.slice(Math.max(0, at - 3), at)
-    if (/[（(【\[/]\s*$/.test(before)) return true
+    if (/[（(【\[/]\s*$/.test(before)) {
+      const beforeBracket = unit.slice(0, Math.max(0, at - 1))
+      const lastToken = /([\u4e00-\u9fa5A-Za-z0-9.+#-]+)\s*$/.exec(beforeBracket)
+      // 括号前是中文 → 中文↔英文并列，放行
+      if (lastToken !== null && /[\u4e00-\u9fa5]/.test(lastToken[1])) return true
+      // 斜杠并列（`持续集成 / CI`）仍算注记位
+      if (/[/]\s*$/.test(before)) return true
+      // 括号前是拉丁词 → 交给规则 ② 判断（多为编造，如 `Java（Redis）`）
+    }
     // ② 多词注记：仅当括号内容是"括号前那个**全大写缩写**的展开"时才认
     const end = at + entity.length
     for (const m of unit.matchAll(/[（(【\[]([^）)】\]]*)[）)】\]]/g)) {
@@ -2552,9 +2756,16 @@ export function verifyRewrite({ original, rewritten, claimedKeywords } = {}) {
   // 且该原文句的中文**没有被其它改写行成段保留**（原句确实被它替换掉了），
   // 则它是**收缩写法**（中文换缩写），不是新增 → 不计入。
   const CONTRACTION_HAN_DROP = 4
-  const novelCheck = detectNovelUnits(originalText, rewrittenText)
-  const originalUnitsForNovel = extractContentUnits(originalText)
-  const rewrittenUnitsForNovel = extractContentUnits(rewrittenText)
+  // 先用**剥离 markdown 排版语法**的文本做单元比对——
+  // 否则 `> 说明`、`| 表格 |`、`[链接](url)`、`---`、`*斜体*` 这些
+  // 纯排版产物会被当成"原文没有的新内容"（真实简历实测误报率 25%）。
+  // 注意：只在这一处（内容单元比对）剥离；存在性判定仍用原文，
+  // 避免剥离不当反而误判"技术名消失"。
+  const originalForUnits = stripMarkdownSyntax(originalText)
+  const rewrittenForUnits = stripMarkdownSyntax(rewrittenText)
+  const novelCheck = detectNovelUnits(originalForUnits, rewrittenForUnits)
+  const originalUnitsForNovel = extractContentUnits(originalForUnits)
+  const rewrittenUnitsForNovel = extractContentUnits(rewrittenForUnits)
   const survivors = novelCheck.novel.filter((unit) => {
     // ⓪ "标题 + 通用英文词注记"不是新增内容。
     //
@@ -2615,18 +2826,65 @@ export function verifyRewrite({ original, rewritten, claimedKeywords } = {}) {
     return retainedElsewhere
   })
 
-  if (survivors.length > 0) {
-    const preview = survivors
+  // ── 分级：新增内容**是否含事实主张** ────────────────────────────────
+  //
+  // 【为什么必须分级（真实简历实测抓出的一批误报）】
+  // 一类是**真正的编造**：凭空多一条"负责用户增长策略实现月活翻倍"——
+  // 含职责动词与数字，是事实性主张，必须判 error。
+  // 另一类是**无主张的说明性文字**：
+  //   `> 以下为在校期间荣誉`、`*本简历由本人独立撰写*`
+  // 它们确实是原文没有的内容，但不含任何可被面试追问的事实
+  // （没有数字、没有机构/技术名、没有职责动词）。
+  // 判 error 只会让用户拿不到文件，收益为零。
+  // 故：含事实主张 → error；否则 → warn（提示但不阻断交付）。
+  //
+  // 【判据用**结构性信号**，不维护虚词清单】
+  // 说明性文字（落款、章节导语、注释）都出现在**正文**；
+  // 而编造章节/项目名出现在**标题行**（`## 项目经历（用户增长系统）`）。
+  // 标题行的新增意味着"多了一个章节/项目"——那是硬性事实主张，必须拦。
+  /** 该单元是否出现在标题行（`#` 开头） */
+  const isOnHeadingLine = (/** @type {string} */ unit) =>
+    rewrittenText
+      .split('\n')
+      .some((line) => /^\s*#{1,6}\s/.test(line) && line.includes(unit.replace(/^#+\s*/, '').trim()))
+  const claimsFacts = (/** @type {string} */ unit) => {
+    if (isOnHeadingLine(unit)) return true // 标题行新增 = 多了一个章节/项目
+    if (/\d/.test(unit)) return true // 含数字（量化结果/日期）
+    if (extractChineseOrgNames(unit).size > 0) return true // 含机构名
+    if (extractLatinProperNouns(unit).size > 0) return true // 含拉丁专名
+    if (extractResponsibilityLevel(unit).maxLevel > 0) return true // 含职责动词
+    return false
+  }
+  const blockingSurvivors = survivors.filter(claimsFacts)
+  const softSurvivors = survivors.filter((u) => !claimsFacts(u))
+
+  if (blockingSurvivors.length > 0) {
+    const preview = blockingSurvivors
       .slice(0, 3)
       .map((u) => (u.length > 40 ? `${u.slice(0, 40)}…` : u))
     findings.push({
       code: 'NOVEL_CONTENT',
       severity: 'error',
       message:
-        `发现 ${survivors.length} 条与原文任何内容都对不上的表述，疑似凭空新增：\n  ` +
+        `发现 ${blockingSurvivors.length} 条与原文任何内容都对不上的表述，疑似凭空新增：\n  ` +
         preview.join('\n  ') +
         '\n每一条改写都必须能追溯到原文的某条经历；新增内容需确认真实，否则删除。',
-      evidence: survivors,
+      evidence: blockingSurvivors,
+    })
+  }
+
+  if (softSurvivors.length > 0) {
+    const preview = softSurvivors
+      .slice(0, 3)
+      .map((u) => (u.length > 40 ? `${u.slice(0, 40)}…` : u))
+    findings.push({
+      code: 'NOVEL_CONTENT',
+      severity: 'warn',
+      message:
+        `发现 ${softSurvivors.length} 条原文没有的说明性文字（不含数字/机构/技术名/职责主张）：\n  ` +
+        preview.join('\n  ') +
+        '\n它们不构成事实性主张，故不阻断交付；但**请确认**是否确有必要新增（如落款、章节导语）。',
+      evidence: softSurvivors,
     })
   }
 
