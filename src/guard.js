@@ -36,7 +36,7 @@
 export const GUARD_LIMITATIONS = [
   '只检测带强后缀的机构名（某某公司/大学/银行…）与拉丁专名；无后缀的机构名（如「字节跳动」）无法可靠识别，需人工确认。',
   '数字按 token 比对，不做语义判断：把「提升 40%」改成「提升四成」不会被发现。',
-  '职责升格按「改写单元 ↔ 原文单元」配对逐对比较，且基于中文动词词表：措辞避开词表的同义升格（如「深度参与」→「全权负责」以外的变体）可能漏检。与原文任何单元都配不上的改写行不参与这一项（整条新增由第 7 项负责，仅当它同时主张了主导层职责时才补充报出）。',
+  '职责升格按「改写单元 ↔ 原文单元」配对逐对比较，且基于**动词词表**（中英各一份：中文 `了解/参与/负责/主导/统筹` 等，英文 `learned/participated/completed/led/decided` 等）：措辞避开词表的同义升格**中英都会漏检**（中文如「参与」→「操盘/掌舵/扛起」，英文如 `supported` → `championed/pioneered/transformed`）。词表判据的固有性质——枚举"哪些算升格"必然滞后，与本文件其它处改枚举为结构判据的教训同源。与原文任何单元都配不上的改写行不参与这一项（整条新增由第 7 项负责，仅当它同时主张了主导层职责时才补充报出）。',
   '整条新增检测按字级相似度判定（阈值校准为 0.25）：与原文任何条目都无重合的内容会被报出；但"把原有经历改写得面目全非"可能被误报为新增，需人工确认。',
   '逐条比对只覆盖长度 ≥ 8 字的内容单元，标题与姓名等短行不参与（短行相似度噪声大，会制造误报）。',
   '拉丁专名的识别依赖"行内位置 + 大小写 + 该行是否含汉字"三者：英文句子的行首词与全小写词不识别（无法与句首大写、普通英文词区分）；纯拉丁的**技术名列表行**（`HTML / CSS / JavaScript`）行首词会被识别；中文行里的全小写技术名（redis / mysql / kafka）可以识别，并用一份常见英文词表过滤误报。词表之外的普通英文词（如混合写法里的 review、mock）可能被误报，需人工确认。',
@@ -437,6 +437,43 @@ const EN_STOPWORDS = new Set(
     'researcher',
     'architect',
     'administrator',
+    // 【表格表头词（审查抓出的误报）】
+    // 把技能区**表格化**是常见排版动作，但表头词会被判"新增技术名"：
+    //   `| Category | Skills |`   → `Category` 被判 FABRICATED_ENTITY → 拒绝导出
+    //   `| Type | Name |`         → `Type`/`Name` 同样
+    // 而 `Skills` 恰好在词表里所以放行 —— **分类不一致**，
+    // 与"简历栏目名漏收"是同一类问题。这些是通用表头词，不含技术栈主张。
+    'category',
+    'categories',
+    'type',
+    'types',
+    'name',
+    'names',
+    'item',
+    'items',
+    'description',
+    'detail',
+    'details',
+    'remark',
+    'remarks',
+    'note',
+    'notes',
+    'level',
+    'proficiency',
+    'year',
+    'years',
+    'duration',
+    'period',
+    'company',
+    'position',
+    'role',
+    'title',
+    'status',
+    'result',
+    'results',
+    'score',
+    'output',
+    'outputs',
     // 【"英文翻译"里的普通名词（真实简历实测抓出的误报）】
     // 中文术语/项目名/学科名并列英文写法时，括号内是**英文翻译**：
     //   `Verilog Hardware Description Language`、
@@ -1318,20 +1355,25 @@ export function detectSelfAttestation(original, rewritten) {
   const o = normalizeText(original).trim()
   const r = normalizeText(rewritten).trim()
   if (o === '' || r === '') return { selfAttested: false, reason: '' }
-  // 【`equal` 用**仅空白归一化**，不能用 `normalizeText`（实测抓出的误拒）】
+  // 【`equal`（硬拒绝档）只认**原始文本完全相同**（实测抓出的误拒）】
   //
-  // `normalizeText` 会剥掉 markdown 排版成分（行首有序列表序号、页码行等）。
-  // 若拿它的结果比相等，下面这种**正常排版差异**会被判成"自证清白"而拒绝导出：
-  //   原文（无页码）→ 改写（补了 `第 1 页 / 共 1 页`）
-  //   归一化后两者相同 → 判 equal → 拒绝导出
-  // 但模型传的确实是**两份不同的文本**，差异在排版层而非"回填改写结果"。
+  // 设计上 `equal` 是硬拒绝档，语义是"调用方把同一份文本传了两次"——
+  // 此时校验退化为自反比对，任何编造都查不出来，必须拒绝。
   //
-  // 正确语义：`equal` = "调用方显然传了同一份文本"，
-  // 只忽略**空白/换行差异**（同一份文本的两种粘贴形式），
-  // 不忽略任何内容差异（页码是内容，序号也是内容）。
-  const whitespaceOnly = (/** @type {unknown} */ s) =>
-    String(s).replace(/\r\n?/g, '\n').replace(/\s+/g, ' ').trim()
-  if (whitespaceOnly(original) === whitespaceOnly(rewritten)) {
+  // 但我一度放宽为"仅空白归一化后相同"，于是**纯缩进调整**这样的合法排版
+  // 也被硬拒绝：
+  //     `- 熟悉 Java\n- 熟悉 MySQL`  →  `  - 熟悉 Java\n  - 熟悉 MySQL`
+  //   → 判 equal → **拒绝导出**（用户拿不到文件）。
+  // 缩进是排版，与"回填改写结果"性质完全不同。
+  //
+  // 现改为：`equal` 只认**去掉行尾/行首空白后逐字相同**，且**统一换行符**
+  // （`\r\n` 与 `\n` 是同一份文本的两种行尾，属排版）。
+  // 空白/换行/缩进差异 → 落到下面的 `contains` 档
+  // （那里只把 `verified` 降级为 false，**不阻断交付**）——两者都不谎称已校验。
+  /** 归一化到"仅统一行尾 + 去首尾空白"，**不做**任何内容层剥离。 */
+  const rawOnly = (/** @type {unknown} */ s) =>
+    String(s).replace(/\r\n?/g, '\n').trim()
+  if (rawOnly(original) === rawOnly(rewritten)) {
     return { selfAttested: true, reason: 'equal' }
   }
   if (o === r) return { selfAttested: false, reason: '' }
@@ -1563,9 +1605,19 @@ export function extractResponsibilityLevel(text) {
  */
 export function stripMarkdownSyntax(input) {
   if (typeof input !== 'string') return ''
-  return input
-    .split('\n')
-    .map((line) => {
+  const lines = input.split('\n')
+  // ── 先标记"表格表头行"（分隔行 `|---|---|` 的**上一行**）────────────
+  // 表头只是标签（`| Type | Name |`），不含事实主张；不剥会被判"凭空新增"
+  // 并拒绝导出（实测）。数据行（分隔行之后）仍保留，故编造写进单元格依然会查。
+  // ⚠️ 必须在 `.map` **之前**做（在 map 里改 `lines[i-1]` 无效——
+  //    那个元素早已处理过了，实测踩到）。
+  const headerRows = new Set()
+  lines.forEach((line, i) => {
+    if (/^\s*\|[\s:|-]+\|\s*$/.test(line) && i > 0) headerRows.add(i - 1)
+  })
+  return lines
+    .map((line, i) => {
+      if (headerRows.has(i)) return '' // 表格表头行
       if (/^\s*\|[\s:|-]+\|\s*$/.test(line)) return '' // 表格分隔行
       if (/^\s*\|/.test(line)) {
         // 表格数据行 → 拍平成单元格文字
@@ -1625,13 +1677,22 @@ export function normalizeText(input) {
       //
       // ⚠️ 分隔符不能写死为 `/`——实测补齐多种常见写法，
       //    否则"第 1 页 共 1 页"（空格分隔）、"第 1 页，共 1 页"（逗号）、
-      //    "1 / 1"、"页码：1" 仍会被误拦（实测 4/9 种写法误拦）。
+      //    "页码：1" 仍会被误拦（实测 4/9 种写法误拦）。
       //
-      // ⚠️ 但"裸 `N / M`"要限定为**小数字**（≤3 位），否则会吞掉年份范围：
-      //    实测 `2026 / 2027` 曾被整行剥掉——那可能是时间线，剥了就查不出日期改动。
-      //    页码不会超过 3 位，而年份是 4 位，故用 `\d{1,3}` 区分。
+      // 【⛔ 裸 `N/M` 必须要求页码上下文（我引入的严重缺陷，经审查抓出）】
+      // 我曾把"整行只有 `N / M`"也当页码剥掉。后果是**静默放行**：
+      //   `12/20` → `3/20`（成绩/排名写成一行的情形）
+      //   整行被剥 → 两侧数字集都为空 → `findings=[]`，
+      //   **连 warn 都没有**。而"专业排名 12/20""绩点 3.8/4.0"是简历真实字段。
+      // 这比"误拒"更符合"虚假安全感"的定义（本项目最忌）。
+      //
+      // 现在：裸 `N/M` **不再**作为页码剥离条件。页码形态一律要求
+      // `第…页` / `页码：` / `Page…of` 等**显式页码词**同现。
+      // 代价：`1 / 1` 这种无任何页码词的裸写法会被当普通数字检查
+      //（可能误报为编造数字）——但那只是"误拒 + 有告警"，用户看得到原因；
+      // 而静默放行一个被改动的真实数值，用户永远不会知道。
       .replace(
-        /^[ \t]*(?:第\s*\d+\s*页(?:\s*[／/|,，、·-]?\s*共\s*\d+\s*页)?|页码\s*[:：]\s*\d{1,3}|page\s*\d{1,3}\s*(?:of|[/|])\s*\d{1,3}|\d{1,3}\s*[/|]\s*\d{1,3})[ \t]*$/gim,
+        /^[ \t]*(?:第\s*\d+\s*页(?:\s*[／/|,，、·-]?\s*共\s*\d+\s*页)?|页码\s*[:：]\s*\d{1,3}|page\s*\d{1,3}\s*(?:of|[/|])\s*\d{1,3})[ \t]*$/gim,
         '',
       )
   )
@@ -2213,9 +2274,27 @@ export function verifyRewrite({ original, rewritten, claimedKeywords } = {}) {
       const lastToken = /([\u4e00-\u9fa5A-Za-z0-9.+#-]+)\s*$/.exec(beforeBracket)
       // 括号前是中文 → 中文↔英文并列，放行
       if (lastToken !== null && /[\u4e00-\u9fa5]/.test(lastToken[1])) return true
-      // 斜杠并列（`持续集成 / CI`）仍算注记位
-      if (/[/]\s*$/.test(before)) return true
       // 括号前是拉丁词 → 交给规则 ② 判断（多为编造，如 `Java（Redis）`）
+    }
+    // ①-b **斜杠并列**要区分两种含义（实测抓出的绕过）：
+    //   · 注记斜杠：`持续集成流程 / CI`——右边是**左边中文术语的英文写法**
+    //   · 列表斜杠：`Java / Spring Boot / MySQL / Redis / Kafka`——两边是**并列的技术栈**
+    // 早期把任何斜杠都当注记位，于是**在斜杠列表末尾追加一个新技能可以绕过检查**：
+    //   `- 熟悉 Java / Spring Boot / MySQL / Redis 的使用；`
+    //   → `- 熟悉 Java / Spring Boot / MySQL / Redis / Kafka 的使用；`
+    //   `Kafka` 被判"注记位"而放行，而同样加 Kafka 用顿号/连接词/换行都判 error
+    //   ——同一件事只因分隔符不同就一拦一放。
+    //
+    // 判据：斜杠**左侧若紧邻另一个拉丁词**，说明这是"拉丁 / 拉丁"的列表并列
+    // （`Redis / Kafka`），不是"中文 / 英文"的注记 → 不放行。
+    // 只有当斜杠左侧是**中文**或行首时，才按注记位处理。
+    if (/[/]\s*$/.test(before)) {
+      const leftOfSlash = unit.slice(0, Math.max(0, at - 1)).replace(/[/]\s*$/, '').trimEnd()
+      const leftToken = /([\u4e00-\u9fa5A-Za-z0-9.+#-]+)$/.exec(leftOfSlash)
+      // 左侧是中文 → 中文术语的英文注记，放行
+      if (leftToken !== null && /[\u4e00-\u9fa5]/.test(leftToken[1])) return true
+      // 左侧是拉丁词 → 列表并列，不放行（交由后续判据按"新增技术名"处理）
+      return false
     }
     // ② 多词注记：仅当括号内容是"括号前那个**全大写缩写**的展开"时才认
     const end = at + entity.length
@@ -3338,12 +3417,20 @@ export function verifyRewrite({ original, rewritten, claimedKeywords } = {}) {
    * 其余一律按事实主张处理（error）——保守侧，与"宁可误拦不放行编造"一致。
    */
   const SOFT_META_PATTERN =
-    /本简历|本人独立撰写|以上(?:内容|经历|信息)|以下(?:内容|经历|荣誉|信息)|注[：:]|说明[：:]|详见|参见|按.{0,6}排列|真实有效|仅供参考|未完待续/
+    /本简历|本人(?:独立)?(?:撰写|完成)|以上|以下|如上|如下|注[：:]|说明[：:]|详见|参见|按.{0,6}排列|真实有效|属实|佐证|可提供|仅供参考|未完待续/
   const isSoftExplanatory = (/** @type {string} */ unit) => {
     const t = unit.trim()
     // ① 纯结构符号（水平线、围栏、表格分隔行的残留）
     if (/^[-*_=~`|\s]+$/.test(t)) return true
-    // ② 含元陈述词（"以上为在校期间荣誉"、"注：按时间倒序排列"）
+    // ② 含元陈述词（"以上/以下…"、"注：…"、"本简历…"）
+    //
+    // 【为什么要放宽到"以上/以下"本身（审查抓出的死锁）】
+    // 原先枚举的是 `以上(内容|经历|信息)` 这类**具体名词组合**，
+    // 于是换个名词就被拒导出——而它们都是同一类章节导语/声明：
+    //   `以下项目均为本人独立或主要参与完成。`  ✘ 被拒（"项目"不在枚举里）
+    //   `以上项目均可提供代码与文档佐证。`      ✘ 被拒
+    // 枚举"以上+什么名词"永远列不全（与本文件反复出现的教训同源）。
+    // 改为只认前缀 `以上/以下/本简历/注：/说明：` 等**元陈述标记**即可。
     if (SOFT_META_PATTERN.test(t)) return true
     // ③ 极短且无实义（单字/双字，多为编号残留）
     if (t.replace(/[\s\p{P}]/gu, '').length <= 2) return true

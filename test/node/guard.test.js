@@ -1573,13 +1573,12 @@ describe('守卫：结构性判据不得放掉真编造（另一侧锁定）', (
   })
 
   test('各种页码写法都不得误拦，但不得吞掉真实内容', () => {
-    // 【实测】页码剥离正则最初只认 `/` 分隔，于是这些写法仍被误拦（4/9）：
-    //   `第 1 页 共 1 页`（空格）、`第 1 页，共 1 页`（逗号）、
-    //   `1 / 1`、`页码：1`
+    // 【实测】页码剥离正则最初只认 `/` 分隔，于是这些写法仍被误拦：
+    //   `第 1 页 共 1 页`（空格）、`第 1 页，共 1 页`（逗号）、`页码：1`
     const BASE = '## 专业技能\n- 熟悉 Java 与 MySQL；\n'
     for (const footer of [
       '第 1 页 / 共 1 页', '第 1 页 共 1 页', '第 1 页，共 1 页', '第1页/共1页',
-      'Page 1 of 1', 'Page 1 / 1', '1 / 1', '第 1 页', '页码：1',
+      'Page 1 of 1', 'Page 1 / 1', '第 1 页', '页码：1',
     ]) {
       const report = verifyRewrite({ original: BASE, rewritten: `${BASE}\n${footer}\n` })
       assert.deepEqual(
@@ -1588,8 +1587,24 @@ describe('守卫：结构性判据不得放掉真编造（另一侧锁定）', (
         `页码「${footer}」是纯排版，不得拒绝导出`,
       )
     }
-    // 反向锁定：正则不得过宽。"裸 N / M" 限定为 ≤3 位数字，
-    // 否则会吞掉**年份范围**（`2026 / 2027` 可能是时间线，剥了就查不出日期改动）。
+
+    // ⚠️ **裸 `N/M`（不含任何页码词）不得被当页码剥离**（我引入的静默缺陷）。
+    // 若剥掉整行，该行数字改动的两侧数字集都为空 → `findings=[]`，
+    // **连 warn 都没有**——而 `12/20`（排名）、`85/100`（分数）是简历真实字段。
+    // 现在要求页码词同现；裸 `N/M` 走普通数字检查（可能误拒，但有告警、用户可见）。
+    for (const [original, rewritten] of [
+      ['工作经历\n- 负责对账系统开发工作\n\n12/20\n', '工作经历\n- 负责对账系统开发工作\n\n3/20\n'],
+      ['成绩\n\n85/100\n', '成绩\n\n95/100\n'],
+    ]) {
+      const report = verifyRewrite({ original, rewritten })
+      assert.equal(report.ok, false, `裸 N/M 行的数值改动必须能查出：${rewritten}`)
+      assert.ok(
+        report.findings.length > 0,
+        '不得静默——必须有告警（哪怕只是 warn）',
+      )
+    }
+
+    // 反向锁定：正则不得过宽，否则会吞掉**年份范围**（可能是时间线）。
     const yearly = verifyRewrite({
       original: '- 2026 / 2027 获奖；',
       rewritten: '- 2025 / 2027 获奖；',
@@ -2080,6 +2095,63 @@ describe('守卫：结构性判据不得放掉真编造（另一侧锁定）', (
         [],
         `说明性/排版内容不得拒绝导出（${label}）：${rewritten}`,
       )
+    }
+  })
+
+  // ── 章节导语/声明的名词组合不得写死（审查抓出的死锁）──────────────────
+  //
+  // 【为什么】元陈述模式最初枚举的是 `以上(内容|经历|信息)` 这类**具体名词**，
+  // 于是换个名词就被拒导出——而它们都是同一类章节导语/声明：
+  //   `以下项目均为本人独立或主要参与完成。`  ✘ 被拒（"项目"不在枚举里）
+  //   `以上项目均可提供代码与文档佐证。`      ✘ 被拒
+  // 枚举"以上+什么名词"永远列不全（与本文件反复出现的教训同源）。
+  test('章节导语/声明（各种名词搭配）不得被拒导出', () => {
+    const BASE = '## 项目经历\n- 使用 Vue2 开发商品列表模块；\n- 参与登录功能开发，完成 5 个接口。\n'
+    for (const line of [
+      '以下项目均为本人独立或主要参与完成。',
+      '以上项目均可提供代码与文档佐证。',
+      '以下经历均为真实经历，可按需提供证明。',
+      '以上内容均属实。',
+      '注：项目按时间倒序排列。',
+      '说明：以下信息真实有效。',
+    ]) {
+      const report = verifyRewrite({ original: BASE, rewritten: `${line}\n\n${BASE}` })
+      assert.deepEqual(
+        report.findings.filter((f) => f.severity === 'error').map((f) => f.code),
+        [],
+        `章节导语不得拒绝导出：${line}`,
+      )
+    }
+  })
+
+  // ── 表格化技能（表头词与表头行）──────────────────────────────────────
+  //
+  // 【审查抓出的两处误报】
+  // ① 表头词被判"新增技术名"：`| Category | Skills |` 里 `Category` 走 error 级
+  //    而 `Skills` 恰好在意词表里所以放行 —— 分类不一致（同"栏目名漏收"一类）。
+  // ② 表头**行**拍平后成内容单元（`Type Name`），与原文对不上 → NOVEL_CONTENT。
+  test('表格化技能不得误拦，且编造写进单元格仍须拦', () => {
+    const BASE = '## 专业技能\n- 熟悉 Java / Spring Boot / MySQL 的使用\n- 熟悉 Vue2、Webpack 前端技术栈\n'
+    for (const [label, table] of [
+      ['Category/Skills', '| Category | Skills |\n|---|---|\n| 后端 | Java / Spring Boot / MySQL |\n| 前端 | Vue2 / Webpack |'],
+      ['Type/Name', '| Type | Name |\n|---|---|\n| Backend | Java |'],
+      ['中文表头', '| 类别 | 内容 |\n|---|---|\n| 后端 | Java / Spring Boot / MySQL |'],
+    ]) {
+      const report = verifyRewrite({ original: BASE, rewritten: `${BASE}\n\n${table}\n` })
+      assert.deepEqual(
+        report.findings.filter((f) => f.severity === 'error').map((f) => f.code),
+        [],
+        `表格化技能不得拒绝导出（${label}）`,
+      )
+    }
+    // 反向锁定：数据行（分隔行**之后**）不剥，编造写进单元格仍须拦。
+    const B2 = '## 项目经历\n- 使用 Java 开发订单系统，负责核心模块设计；\n'
+    for (const table of [
+      '| 能力 | 水平 |\n|---|---|\n| 架构设计能力 | 精通级别 |',
+      '| 指标 | 值 |\n|---|---|\n| QPS | 9999 |',
+    ]) {
+      const report = verifyRewrite({ original: B2, rewritten: `${B2}\n\n${table}\n` })
+      assert.equal(report.ok, false, `表格单元格里的编造必须拦下：${table}`)
     }
   })
 
@@ -2654,6 +2726,21 @@ describe('守卫：自证清白判定（S1-3，交付关依赖它）', () => {
   test('仅空白/换行不同 → 仍判为自证清白', () => {
     assert.equal(detectSelfAttestation(`${ORIGINAL}  `, ORIGINAL).selfAttested, true)
     assert.equal(detectSelfAttestation(ORIGINAL.replace(/\n/g, '\r\n'), ORIGINAL).selfAttested, true)
+  })
+
+  test('纯缩进/排版差异不得硬拒绝（只降级 verified）', () => {
+    // 【实测抓出的误拒】`equal` 是**硬拒绝档**，语义是"同一份文本传了两次"。
+    // 我一度把它放宽为"仅空白归一化后相同"，于是**纯缩进调整**也被硬拒绝：
+    //     `- 熟悉 Java\n- 熟悉 MySQL` → `  - 熟悉 Java\n  - 熟悉 MySQL`
+    //   → 判 equal → **拒绝导出**（用户拿不到文件）。
+    // 缩进是排版，与"回填改写结果"性质完全不同。
+    // 现 `equal` 只认"统一行尾 + 去首尾空白后逐字相同"，
+    // 缩进差异落到 `contains` 档（只降级 verified，不阻断交付）。
+    const base = '- 熟悉 Java\n- 熟悉 MySQL'
+    const indented = '  - 熟悉 Java\n  - 熟悉 MySQL'
+    const r = detectSelfAttestation(indented, base)
+    assert.equal(r.selfAttested, true, '缩进版仍是同一份内容')
+    assert.equal(r.reason, 'contains', '缩进属排版差异，不得判 equal 硬拒绝')
   })
 
   test('副本 + 一行装饰性文字 → 命中 contains 档（这是 S1-3 的原始绕过）', () => {
