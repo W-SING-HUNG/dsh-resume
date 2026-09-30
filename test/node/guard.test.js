@@ -1498,6 +1498,43 @@ describe('守卫：结构性判据不得放掉真编造（另一侧锁定）', (
     }
   })
 
+  // ── markdown 有序列表序号不是"编造数字"（真实简历实测抓出的死锁）──────
+  //
+  // 【为什么（实测）】把无序列表改成有序列表是最常见的排版动作：
+  //   `- 熟悉 Java\n- 熟悉 MySQL` → `1. 熟悉 Java\n2. 熟悉 MySQL`
+  // 而 `1`/`2`/`3` 会被当作"改写后新增的数字"→ 判 FABRICATED_NUMBER
+  // → **拒绝导出**。但它们是**排版序号**，不含任何事实主张。
+  // 修法是在 normalizeText 最前面就剥掉行首序号，使所有下游检查都看不到它们。
+  test('把无序列表改成有序列表不得被判为编造数字', () => {
+    for (const [original, rewritten] of [
+      [
+        '## 专业技能\n- 熟悉 Java\n- 熟悉 MySQL\n- 了解 Docker\n',
+        '## 专业技能\n1. 熟悉 Java\n2. 熟悉 MySQL\n3. 了解 Docker\n',
+      ],
+      ['- 提升 40%；', '1. 提升 40%；'], // 序号 + 真实数字保留
+      ['- 熟悉 Java', '1) 熟悉 Java'], // 另一种序号写法
+    ]) {
+      const report = verifyRewrite({ original, rewritten })
+      assert.deepEqual(
+        report.findings.filter((f) => f.severity === 'error').map((f) => f.code),
+        [],
+        `列表序号是排版，不得当成编造数字：${rewritten}`,
+      )
+    }
+  })
+
+  test('但序号化不能掩盖真实的编造数字', () => {
+    // 反向锁定：剥掉序号的同时，被改动的真实数值必须仍被抓。
+    for (const [original, rewritten] of [
+      ['- 提升 40%；', '1. 提升 65%；'],
+      ['- 服务 8 万用户；', '1. 服务 80 万用户；'],
+    ]) {
+      const report = verifyRewrite({ original, rewritten })
+      assert.equal(report.ok, false, `序号化不得掩护编造数字：${rewritten}`)
+      assert.ok(report.findings.some((f) => f.code === 'FABRICATED_NUMBER'))
+    }
+  })
+
   // ── "收缩写法"不得成为"另起一行新增技能"的挡箭牌（第四次绕过后的根本约束）──
   //
   // 【为什么这组用例至关重要】
