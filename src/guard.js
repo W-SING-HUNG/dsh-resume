@@ -830,6 +830,7 @@ export function extractAmbiguousLatinTokens(text) {
  * 提取形态：
  *   - 四位年份：2019、2024
  *   - 年月：2019.06、2019-06、2019年6月
+ *   - **英文年月**：Sep 2022、September 2022、2022 Sep（插件支持 language: 'en'）
  *
  * @param {string} text 待提取文本
  * @returns {Set<string>} 归一化时间点集合（统一为 `YYYY` 或 `YYYY-MM`）
@@ -854,17 +855,48 @@ export function extractDateTokens(text) {
   // `(?!\d)` 用来堵回溯：`2019-2021` 里 `20` 因 >12 失败后，
   // 正则会退而匹配单个 `2`——那会得到 `2019-02`，同样错误。
   const consumed = []
+  /** 英文月份名/缩写 → 月份数字（插件支持 language: 'en'） */
+  const MONTHS_EN = /** @type {Record<string, number>} */ ({
+    jan: 1, january: 1, feb: 2, february: 2, mar: 3, march: 3,
+    apr: 4, april: 4, may: 5, jun: 6, june: 6, jul: 7, july: 7,
+    aug: 8, august: 8, sep: 9, sept: 9, september: 9, oct: 10, october: 10,
+    nov: 11, november: 11, dec: 12, december: 12,
+  })
   const ymPatterns = [
     /((?:19|20)\d{2})\s*[年.\-/]\s*(0?[1-9]|1[0-2])(?!\d)\s*月?/g,
+    // 英文年月：`Sep 2022` / `September 2022`（月份在前）
+    /\b([A-Za-z]{3,9})\.?\s+((?:19|20)\d{2})\b/g,
+    // 英文年月：`2022 Sep` / `2022 September`（年份在前）
+    /\b((?:19|20)\d{2})\s+([A-Za-z]{3,9})\.?\b/g,
   ]
   let masked = src
   for (const re of ymPatterns) {
     for (const m of masked.matchAll(re)) {
-      const year = m[1]
-      const month = String(Number(m[2])).padStart(2, '0')
-      const token = `${year}-${month}`
-      out.add(token)
-      consumed.push(m[0])
+      // 三种形态统一处理，**按"哪个 capture 是数字月份"分流**，不按顺序猜：
+      //   ① 中文/数字年月：`2022年9月`、`2022.09`、`2022-09` → m[1]=年, m[2]=数字月
+      //   ② 英文月在前：  `Sep 2022`                        → m[1]=月名, m[2]=年
+      //   ③ 英文年在先：  `2022 Sep`                        → m[1]=年, m[2]=月名
+      const a = m[1]
+      const b = m[2]
+      const aIsYear = /^(?:19|20)\d{2}$/.test(a)
+      const bIsYear = /^(?:19|20)\d{2}$/.test(b)
+      if (aIsYear && /^\d{1,2}$/.test(b)) {
+        // ① 数字月份
+        out.add(`${a}-${String(Number(b)).padStart(2, '0')}`)
+        consumed.push(m[0])
+      } else if (aIsYear && !bIsYear) {
+        // ③ 年在前、月名在后
+        const month = MONTHS_EN[b.toLowerCase()]
+        if (month === undefined) continue
+        out.add(`${a}-${String(month).padStart(2, '0')}`)
+        consumed.push(m[0])
+      } else if (bIsYear && !aIsYear) {
+        // ② 月名在前、年在后
+        const month = MONTHS_EN[a.toLowerCase()]
+        if (month === undefined) continue
+        out.add(`${b}-${String(month).padStart(2, '0')}`)
+        consumed.push(m[0])
+      }
     }
   }
   // 把已消费的年月片段替换掉，避免裸年份规则再抓一次
@@ -2923,12 +2955,28 @@ export function verifyRewrite({ original, rewritten, claimedKeywords } = {}) {
   // 起止日期属于"绝不可改写"的事实字段。改写若动了年份/月份，
   // 会导致与背调信息不符。
   if (originalDates.size > 0) {
+    // 原文涉及的年份，以及**已有具体月份**的年份。
     const originalYears = new Set([...originalDates].map((d) => d.slice(0, 4)))
+    const yearsWithMonth = new Set(
+      [...originalDates].filter((d) => d.length > 4).map((d) => d.slice(0, 4)),
+    )
     const changedDates = [...rewrittenDates].filter((d) => {
       if (originalDates.has(d)) return false
-      // 原文只写了年份、改写补了同一年月份 → 不算改动
       const year = d.slice(0, 4)
-      return !originalYears.has(year)
+      // 年份原文没出现过 → 改动（新时间点）
+      if (!originalYears.has(year)) return true
+      // 【⚠️ 同一年内的**月份改动**必须抓（实测抓出的漏报）】
+      //
+      // 早期逻辑是"年份出现过就放行"，动机是容忍"补全月份"
+      //（`2022` → `2022年9月`）。但那样实现太粗，连带放过了真改动：
+      //   `- 2022年9月入职；` → `- 2022年10月入职；`
+      //   实测零告警 —— 而"起止日期改动"正是最该拦的事实错误之一。
+      //
+      // 正确区分：
+      //   · 原文该年**只有年份、没有月份** → 补全月份属写法完善 → 放行
+      //   · 原文该年**已有具体月份**、改写换成别的月份 → 真改动 → 拦住
+      if (d.length > 4 && yearsWithMonth.has(year)) return true
+      return false
     })
     if (changedDates.length > 0) {
       findings.push({

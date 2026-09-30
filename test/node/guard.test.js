@@ -1804,6 +1804,73 @@ describe('守卫：结构性判据不得放掉真编造（另一侧锁定）', (
     }
   })
 
+  // ── 日期：英文年月 + 同一年内的月份改动 ─────────────────────────────
+  //
+  // 【实测抓出的两处真问题】
+  // ① 英文年月无法解析：`Sep 2022` 只抽到年份 `2022`（月份丢失），
+  //    于是英文简历上"月份被改动"完全查不出来。
+  // ② **中文侧也有漏报**：`- 2022年9月入职；` → `- 2022年10月入职；`
+  //    日期 token 确实不同（`2022-09` vs `2022-10`），但判定逻辑里
+  //    "年份出现过就放行"把**同年内的月份改动**一并放过了。
+  test('英文年月（Sep 2022 / 2022 Sep）必须能被解析', () => {
+    for (const [input, expected] of [
+      ['Sep 2022 - Jun 2026', ['2022-09', '2026-06']],
+      ['September 2022', ['2022-09']],
+      ['2022 Sep', ['2022-09']],
+      ['Jan 2021 - Dec 2021', ['2021-01', '2021-12']],
+    ]) {
+      const got = [...extractDateTokens(input)].sort()
+      assert.deepEqual(got, expected.slice().sort(), `${input} 的年月解析不正确`)
+    }
+  })
+
+  test('中文年月解析不得因新增英文规则而退化', () => {
+    // 反向锁定：加英文月份解析时，我一度让 `2022年9月` 只抽出 `2022`
+    // （分支判断按 capture 顺序猜，把数字月份走进了英文分支）。
+    // 这条用例确保中文主路径不受影响。
+    for (const [input, expected] of [
+      ['2022年9月入职', ['2022-09']],
+      ['2022.09', ['2022-09']],
+      ['2022-09', ['2022-09']],
+      ['2019 - 2021', ['2019', '2021']],
+    ]) {
+      const got = [...extractDateTokens(input)].sort()
+      assert.deepEqual(got, expected.slice().sort(), `${input} 的中文年月解析不正确`)
+    }
+  })
+
+  test('月份改动（中文与英文）都必须判为日期改动', () => {
+    for (const [original, rewritten] of [
+      ['- 2022年9月入职；', '- 2022年10月入职；'], // 中文，同年内换月
+      ['- Sep 2022 - Jun 2026', '- Oct 2022 - Jun 2026'], // 英文缩写
+      ['- September 2022', '- October 2022'], // 英文全称
+      ['- Sep 2022', '- Sep 2021'], // 年份改动
+    ]) {
+      const report = verifyRewrite({ original, rewritten })
+      assert.equal(report.ok, false, `日期改动必须拦下：${rewritten}`)
+      assert.ok(
+        report.findings.some((f) => f.code === 'FABRICATED_DATE'),
+        `必须报出 FABRICATED_DATE：${rewritten}`,
+      )
+    }
+  })
+
+  test('但"原文只有年份、改写补全月份"不算日期改动', () => {
+    // 反向锁定：`2022` → `2022年9月` 是写法完善，不是改动，
+    // 不得因此拒绝导出（这是当年加"年份放行"的原始动机，必须保住）。
+    for (const [original, rewritten] of [
+      ['- 2022 年毕业；', '- 2022年9月毕业；'],
+      ['- 2022', '- Sep 2022'],
+    ]) {
+      const report = verifyRewrite({ original, rewritten })
+      assert.deepEqual(
+        report.findings.filter((f) => f.code === 'FABRICATED_DATE').map((f) => f.code),
+        [],
+        `补全月份不得判为日期改动：${rewritten}`,
+      )
+    }
+  })
+
   test('正文里的说明性文字降为 warn（不含事实主张，不阻断交付）', () => {
     // 落款、章节导语这类新增文字不含数字/机构/技术名/职责主张，
     // 判 error 只会让用户拿不到文件。降为 warn：提示但不阻断。
