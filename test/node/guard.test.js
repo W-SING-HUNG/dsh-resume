@@ -1572,6 +1572,32 @@ describe('守卫：结构性判据不得放掉真编造（另一侧锁定）', (
     }
   })
 
+  test('各种页码写法都不得误拦，但不得吞掉真实内容', () => {
+    // 【实测】页码剥离正则最初只认 `/` 分隔，于是这些写法仍被误拦（4/9）：
+    //   `第 1 页 共 1 页`（空格）、`第 1 页，共 1 页`（逗号）、
+    //   `1 / 1`、`页码：1`
+    const BASE = '## 专业技能\n- 熟悉 Java 与 MySQL；\n'
+    for (const footer of [
+      '第 1 页 / 共 1 页', '第 1 页 共 1 页', '第 1 页，共 1 页', '第1页/共1页',
+      'Page 1 of 1', 'Page 1 / 1', '1 / 1', '第 1 页', '页码：1',
+    ]) {
+      const report = verifyRewrite({ original: BASE, rewritten: `${BASE}\n${footer}\n` })
+      assert.deepEqual(
+        report.findings.filter((f) => f.severity === 'error').map((f) => f.code),
+        [],
+        `页码「${footer}」是纯排版，不得拒绝导出`,
+      )
+    }
+    // 反向锁定：正则不得过宽。"裸 N / M" 限定为 ≤3 位数字，
+    // 否则会吞掉**年份范围**（`2026 / 2027` 可能是时间线，剥了就查不出日期改动）。
+    const yearly = verifyRewrite({
+      original: '- 2026 / 2027 获奖；',
+      rewritten: '- 2025 / 2027 获奖；',
+    })
+    assert.equal(yearly.ok, false, '年份范围改动必须仍能抓出')
+    assert.ok(yearly.findings.some((f) => f.code === 'FABRICATED_DATE'))
+  })
+
   // ── markdown 排版语法不是"新增内容"（真实简历实测抓出的一批死锁）──────
   //
   // 【为什么】下列都是**纯排版动作**，却会把 markdown 语法本身当成新内容：
