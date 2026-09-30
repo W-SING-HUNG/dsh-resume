@@ -21,10 +21,16 @@
 // │ 合并处职责变化 / 容量单位大小写）。写死一种会让模型**照错方向修正**，   │
 // │ 而校验闭环正是靠这段说明驱动的。现要求模型按工具返回的具体条目处理，    │
 // │ 并说明"折行/拆分技术名列表不会产生消失提醒"（该判定按全文进行）。       │
+// │                                                                        │
+// │ v1.4.0：ok=false 的说明补上「凭空新增整条经历」。                       │
+// │ 原因：实现里 error 级有 6 类，而说明只列了 5 类，漏掉 NOVEL_CONTENT     │
+// │（凭空多写一条没做过的经历）——那恰恰是最该拦的编造类型。                │
+// │ 同时补上英文侧的新能力：职责升格现已在英文简历上生效                    │
+// │（此前动词表只有中文，英文侧这道检查完全空转）。                        │
 // └────────────────────────────────────────────────────────────────────────┘
 
 /** 当前 prompt 版本。任何措辞改动都应递增，便于回溯输出质量变化。 */
-export const PROMPT_VERSION = '1.3.0'
+export const PROMPT_VERSION = '1.4.0'
 
 /** 支持的语言，与工具参数 schema 的 enum 保持一致。 */
 export const SUPPORTED_LANGUAGES = /** @type {const} */ (['zh', 'en'])
@@ -57,7 +63,8 @@ export function RESUME_SYSTEM_PROMPT(language = "zh") {
 - claimedKeywords 会被**回验**：你声称覆盖的每个词必须真的出现在改写结果里。
   ★ 严禁虚报覆盖率——声称了却没写进去，会被判为未通过。
 - 若返回 ok=false：说明改写引入了原文不存在的数字/机构、或升格了职责、
-  或改动了日期、或关键词虚报。你必须**修正后重新校验**，直到 ok=true 才能交付。
+  或改动了日期、或关键词虚报、**或凭空新增了整条经历/职责**。
+  你必须**修正后重新校验**，直到 ok=true 才能交付。
   修正原则是删除或改写那些编造内容，绝不允许"保留但说明"。
 - 若返回 ok=true 但有提醒（"建议检查"级）：逐条按**工具返回的具体说明**处理，
   不要把提醒笼统当成"数据丢失"。提醒可能是：
@@ -106,9 +113,10 @@ The hard rules cannot rest on good intentions. After rewriting, you MUST call ve
 - claimedKeywords is verified: every keyword you claim must actually appear in the
   rewrite. Do NOT overstate coverage: claiming a keyword you did not write in fails.
 - If it returns ok=false, the rewrite introduced numbers or organizations absent from
-  the original, inflated responsibility, altered a date, or overstated keyword coverage.
-  FIX the content and verify again until ok=true before delivering. Remove or rephrase
-  the fabricated parts; never "keep but annotate" them.
+  the original, inflated responsibility, altered a date, overstated keyword coverage,
+  **or invented a whole new experience/bullet**. FIX the content and verify again until
+  ok=true before delivering. Remove or rephrase the fabricated parts; never "keep but
+  annotate" them.
 - If ok=true with warnings ("check suggested"), handle them **by each item the tool
   actually returns** — do not assume they all mean "data lost". They may be:
   (a) genuine metrics from the original lost in the rewrite → restore unless intentional;
