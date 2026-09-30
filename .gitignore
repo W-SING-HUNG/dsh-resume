@@ -43,5 +43,11 @@ Thumbs.db
 *.orig
 *.rej
 
+# 排查用的临时脚本（ai 协作时常用 `.tmp-*.mjs` 命名做一次性验证）
+# 实测踩过一次：`git add -A` 把它们一起提交了。
+.tmp-*.mjs
+.tmp-*.js
+.tmp-*.md
+
 # 本项目的 hook 备份（setup-hooks.ps1 产物）
 .githooks/*.bak
