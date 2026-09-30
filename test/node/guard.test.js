@@ -1612,6 +1612,35 @@ describe('守卫：结构性判据不得放掉真编造（另一侧锁定）', (
     }
   })
 
+  test('页码/页脚与职能类英文词不得造成误报', () => {
+    for (const [original, rewritten] of [
+      // 页码是纯排版；不剥离则 `1` 被当成编造数字
+      ['## 项目经历\n- 使用 SQL 与 Python 清洗 200 万条行为数据；',
+        '## 项目经历\n- 使用 SQL 与 Python 清洗 200 万条行为数据；\n\n---\n\n第 1 页 / 共 1 页\n'],
+      ['Page 1 of 1', 'Page 1 of 1'],
+      // 职能类普通英文词（`数据分分析师（Data Analyst）`）
+      ['- 求职意向：数据分析师', '- 求职意向：数据分析师（Data Analyst）'],
+    ]) {
+      const report = verifyRewrite({ original, rewritten })
+      assert.deepEqual(
+        report.findings.filter((f) => f.severity === 'error').map((f) => f.code),
+        [],
+        `不得拒绝导出：${rewritten}`,
+      )
+    }
+  })
+
+  test('但新增技能条目仍必须拦下（职能词补表不得掩护技能主张）', () => {
+    // 反向锁定：给词表补了 analyst/engineer 等职能词，不能因此放过"新增技能"。
+    for (const [original, rewritten] of [
+      ['- 熟悉 Tableau；', '- 熟悉 Tableau；\n- 熟悉 Excel 数据透视与函数；'],
+      ['- 熟悉 SQL；', '- 熟悉 SQL；\n- 熟悉 Python pandas；'],
+    ]) {
+      const report = verifyRewrite({ original, rewritten })
+      assert.equal(report.ok, false, `新增技能条目必须拦下：${rewritten}`)
+    }
+  })
+
   test('正文里的说明性文字降为 warn（不含事实主张，不阻断交付）', () => {
     // 落款、章节导语这类新增文字不含数字/机构/技术名/职责主张，
     // 判 error 只会让用户拿不到文件。降为 warn：提示但不阻断。

@@ -416,6 +416,26 @@ const EN_STOPWORDS = new Set(
     'dictionary',
     'virtual',
     'machine',
+    // 职位/职能类普通英文词（`求职意向：数据分析师（Data Analyst）`）
+    // —— 与 `Engineering`/`Development` 同类，是**职能描述**而非技术栈主张。
+    'analyst',
+    'analysis',
+    'analytics',
+    'engineer',
+    'engineering',
+    'designer',
+    'developer',
+    'specialist',
+    'consultant',
+    'manager',
+    'director',
+    'intern',
+    'assistant',
+    'associate',
+    'scientist',
+    'researcher',
+    'architect',
+    'administrator',
   ].map((w) => w.toLowerCase()),
 )
 
@@ -1335,6 +1355,15 @@ export function normalizeText(input) {
       //   `2026.06 入职` 虽在行首，但 `2026` 是 4 位数、且 `.` 后紧跟数字
       //   （正则需要 `.` 后有空白），故也不会被剥。
       .replace(/^([ \t]{0,3})\d{1,3}[.)][ \t]+/gm, '$1')
+      // ── 剥离页码/页脚行（实测抓出的死锁）────────────────────────────
+      // `第 1 页 / 共 1 页`、`Page 1 of 2` 是**纯排版**，但其中的 `1`
+      // 会被判为"改写后新增的数字"→ FABRICATED_NUMBER → 拒绝导出。
+      // 这里同样在归一化最前面剥掉（`stripMarkdownSyntax` 里也剥，
+      // 但那条只用于内容单元比对，数字检查走的是本函数）。
+      .replace(
+        /^[ \t]*(?:第\s*\d+\s*页(?:\s*[／/|]\s*共\s*\d+\s*页)?|page\s*\d+\s*(?:of|\/)\s*\d+)[ \t]*$/gim,
+        '',
+      )
   )
 }
 
