@@ -1562,6 +1562,26 @@ const CN_MAGNITUDES = /** @type {const} */ ([
 ])
 
 /**
+ * 英文数量级后缀 → 倍率。
+ *
+ * 【为什么需要（英文简历实测抓出的死锁，与中文数量级同源）】
+ * `8K` 与 `8000`、`1.5M` 与 `1500000` 是同一数值的两种写法，
+ * 但英文简历实测：
+ *   `Handled 8K requests` → `Handled 8000 requests`   → 判 FABRICATED_NUMBER ✘
+ *   `1.5M users` → `1500000 users`                     → 判 FABRICATED_NUMBER ✘
+ * 反向（`8000` → `8K`）同样被拒。这与 `8 万 → 80000` 是**完全同类**的问题
+ * （中文侧早已修好，英文侧漏了）。
+ *
+ * 只收无歧义的后缀：`K`/`M`/`B`（千/百万/十亿）。
+ * **不**收裸 `k`（可能是千克）——那由单位表处理。
+ */
+const EN_MAGNITUDES = /** @type {const} */ ([
+  ['B', 1e9],
+  ['M', 1e6],
+  ['K', 1e3],
+])
+
+/**
  * 把带中文数量级的数字归一化为纯数字串（`1.2万` → `12000`）。
  * @param {string} digits 数字部分（如 `1.2`）
  * @param {string} unit 数量级词（如 `万`）
@@ -1665,14 +1685,29 @@ export function extractNumericTokens(text) {
     maskedUnits = maskedUnits.replace(frag, ' ')
   }
 
-  // 数字主体：允许小数与千分位；其后可紧跟中文数量级词（允许中间有空格）
-  for (const m of maskedUnits.matchAll(/(\d[\d,.]*)\s*(亿|万|千)?/g)) {
+  // 数字主体：允许小数与千分位；其后可紧跟数量级词。
+  // 中文数量级（亿/万/千）与**英文数量级**（K/M/B，见 EN_MAGNITUDES）都归一化。
+  // 英文后缀要求**紧跟数字且后接非字母**（避免 `8KB` 里的 K 被误当数量级——
+  // `8KB` 走的是单位表，`8K users` 才是数量级）。
+  for (const m of maskedUnits.matchAll(/(\d[\d,.]*)\s*(亿|万|千|[KMB])?(?![A-Za-z])/g)) {
     const raw = m[1]
     const unit = m[2]
     const token = raw.replace(/,/g, '').replace(/\.$/, '')
     if (token === '') continue
-    // 带数量级词时归一化为纯数字（`1.2万` → `12000`）
-    out.add(unit === undefined ? token : applyMagnitude(token, unit))
+    if (unit === undefined) {
+      out.add(token)
+      continue
+    }
+    // 带数量级词时归一化为纯数字（`1.2万` → `12000`、`8K` → `8000`）
+    const enMagnitude = EN_MAGNITUDES.find(([u]) => u === unit)?.[1]
+    if (enMagnitude !== undefined) {
+      const value = Number(token) * enMagnitude
+      out.add(
+        Number.isFinite(value) && value >= 0 ? String(value) : `${token}${unit}`,
+      )
+      continue
+    }
+    out.add(applyMagnitude(token, unit))
   }
   return out
 }

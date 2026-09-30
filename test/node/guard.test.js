@@ -1751,6 +1751,59 @@ describe('守卫：结构性判据不得放掉真编造（另一侧锁定）', (
     }
   })
 
+  // ── 英文数量级（K/M/B）——与中文数量级同源，英文侧曾漏做 ────────────────
+  //
+  // 【实测】`Handled 8K requests` → `Handled 8000 requests` 被判
+  // FABRICATED_NUMBER 并拒绝导出；反向（`8000` → `8K`）同样被拒；
+  // `1.5M` ↔ `1500000` 同理。这与早就修好的 `8 万` ↔ `80000`
+  // 是**完全同类**的问题——中文侧修了，英文侧漏了。
+  // 只统一**写法**，不放宽判定：`8K → 80K` 仍会被抓。
+  test('英文数量级 K/M/B 的等价写法必须放行', () => {
+    for (const [original, rewritten] of [
+      ['- Handled 8K requests daily', '- Handled 8000 requests daily'],
+      ['- Handled 8000 requests daily', '- Handled 8K requests daily'],
+      ['- 12K records processed', '- 12000 records processed'],
+      ['- 1.5M users', '- 1500000 users'],
+      ['- 1500000 users', '- 1.5M users'],
+    ]) {
+      const report = verifyRewrite({ original, rewritten })
+      assert.deepEqual(
+        report.findings.filter((f) => f.severity === 'error').map((f) => f.code),
+        [],
+        `数量级写法差异不得拒绝导出：${rewritten}`,
+      )
+    }
+  })
+
+  test('但英文数量级的真实改动仍必须抓（K/M/B 归一化不得放宽判定）', () => {
+    for (const [original, rewritten] of [
+      ['- Handled 8K requests daily', '- Handled 80K requests daily'],
+      ['- 1.5M users', '- 2.5M users'],
+      ['- 12K records', '- 120K records'],
+    ]) {
+      const report = verifyRewrite({ original, rewritten })
+      assert.equal(report.ok, false, `数量真的变了必须拦：${rewritten}`)
+      assert.ok(report.findings.some((f) => f.code === 'FABRICATED_NUMBER'))
+    }
+  })
+
+  test('容量/时间单位不得被误当数量级（8KB 与 8K 是两回事）', () => {
+    // `8KB` 走单位表（size），`8K users` 走数量级（8000）。
+    // 若把 `K` 无差别当数量级，`8KB` 会被错算成 8192，与 `8 KB` 不等价。
+    for (const [original, rewritten] of [
+      ['- 支持 8KB 文件；', '- 支持 8 KB 文件；'],
+      ['- 耗时 2.4s；', '- 耗时 2400ms；'],
+      ['- 缓存 100MB；', '- 缓存 100 MB；'],
+    ]) {
+      const report = verifyRewrite({ original, rewritten })
+      assert.deepEqual(
+        report.findings.filter((f) => f.severity === 'error').map((f) => f.code),
+        [],
+        `单位换算不得拒绝导出：${rewritten}`,
+      )
+    }
+  })
+
   test('正文里的说明性文字降为 warn（不含事实主张，不阻断交付）', () => {
     // 落款、章节导语这类新增文字不含数字/机构/技术名/职责主张，
     // 判 error 只会让用户拿不到文件。降为 warn：提示但不阻断。
