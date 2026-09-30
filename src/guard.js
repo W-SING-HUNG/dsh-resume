@@ -46,7 +46,8 @@ export const GUARD_LIMITATIONS = [
   '**原文技术名消失且无其它技术名接替**（`CSS` → `层叠样式表`、或直接删掉 `CSS`）报"建议检查"而非"必须修正"——因为这类改动**没有凭空增加主张**（只是换成中文表述或精简），与编造性质不同；判 error 会拦下合法改写造成死锁。但它**不会被静默放过**（这一点曾是实现缺陷：早期该路径完全无告警）。"消失"按**全文**判定，故折行/拆分/跨行搬移不会误报。',
   '容量单位的大小写变化（`2MB` ↔ `2Mb`）报"建议检查"：`b` 与 `B` 分别是比特与字节、相差 8 倍，而 `KB/kb`、`MB/mb` 是同一含义的常见混写——纯文本无法判定作者本意，故只提示不阻断。',
   '**新增技能按结构判据分级**：处于括号/斜杠注记位的英文（`超文本传输协议（HTTP）`）与"中文换缩写"的收缩写法（`熟悉超文本传输协议；` → `熟悉 HTTP；`）判"建议检查"；而"原文有一条中文显著更多的句子**仍原封不动地保留着**、本行却多出原文全篇都没有的技术名"判"必须修正"（即凭空多加一项技能）。**代价**：在原文句保留的前提下**另起一行**只写缩写（`- 熟悉 HTTP；`）也会被判"必须修正"——因为该写法与编造技能（`- 熟悉 Redis；`）在文本上无法区分。此时请把缩写并入原句（`- 熟悉超文本传输协议（HTTP）…`），那是被放行的。',
-  '**多词英文注记只认"全大写缩写 + 其展开"**：`JVM（Java Virtual Machine）`、`GPA（Grade Point Average）`、`HTTP（HyperText Transfer Protocol）` 会被放行（判"建议检查"）——它们只是把**已有缩写**写成全称，没有新增技能主张。而 `Java（Just Another Vague Abbreviation）`、`数据库（Redis Cluster）` 会被拦：前者括号前是**普通单词而非缩写**（`Java` 带小写字母），后者括号内是**原文没有的技能**。**代价（已知误报）**：括号前是**中文**时无法做这种校验（中文没有首字母），因此 `超文本传输协议（HyperText Transfer Protocol）` 与 `## 专业技能（Skills）` 这类"中文术语 + 英文全称/对照"会被拦下。**建议写法**：用缩写形式 `超文本传输协议（HTTP）`（被放行），或干脆不加英文对照。此处刻意选择"宁可误拦、不放行编造"——因为同形的 `## 项目经历（用户增长系统）` 是典型的编造，纯文本无法区分二者。',
+  '**多词英文注记只认"全大写缩写 + 其展开"**：`JVM（Java Virtual Machine）`、`GPA（Grade Point Average）`、`HTTP（HyperText Transfer Protocol）` 会被放行（判"建议检查"）——它们只是把**已有缩写**写成全称，没有新增技能主张。而 `Java（Just Another Vague Abbreviation）`、`数据库（Redis Cluster）` 会被拦：前者括号前是**普通单词而非缩写**（`Java` 带小写字母），后者括号内是**原文没有的技能**。括号前是**中文**时（`超文本传输协议（HyperText Transfer Protocol）`、`## 专业技能（Skills）`）同样放行——中文术语并列英文是 ATS 常规动作，无法也不必做首字母校验。',
+  '**英文简历的"缩写 ⇄ 全称"识别三类形态**：① **逐词首字母**：`JVM ⇄ Java Virtual Machine`、`SQL ⇄ Structured Query Language`；② **词内大写**：`HTTP ⇄ HyperText Transfer Protocol`（HyperText 贡献 H 与 T）；③ **数字式**：`K8s ⇄ Kubernetes`、`i18n ⇄ internationalization`（首字母 + 中间字母数 + 尾字母，判据可验证）。三者都报"建议检查"而不阻断。**唯一覆盖不到、会判"必须修正"（已知边界）**：**词内取字母型**如 `REST` = **R**epresentational State Transfer（`E` 取自词内而非任何词首）——它与"普通单词恰好首字母拼成同一串"（如 `Java` → `JAVA`）在纯文本上无法区分，放宽会放过 `Java → Java Virtual Machine`（那确实新增了 JVM 主张）。遇到这类时，请保留缩写写法本身（`Built REST APIs` 原样不动），不要改写成全称。',
   '本校验只做文本特征比对，不判断内容是否真实。它拦得住"与原文对不上"的编造，拦不住"原文本身就写了假的"。',
 ]
 
@@ -529,6 +530,19 @@ const EN_STOPWORDS = new Set(
     'october',
     'november',
     'december',
+    // ⚠️ 这里**刻意不收** `representational`/`state`/`transfer`。
+    //
+    // 试过收进来（为了让 `REST（Representational State Transfer）`
+    // 这个"缩写+全称并列"的写法通过），实测发现是**净亏损**：
+    //   `- Built APIs` → `- Built APIs\n- Used Representational State Transfer`
+    //   从"拦住"变成"**可导出**"——凭空新增一项完整技能被放过了。
+    // 因为这三个词一旦成为"泛指词"，`Representational State Transfer`
+    // 整句就不再含任何 error 级专名。
+    // 结论：宁可让 `REST ⇄ 全称` 这一种写法被拦（已知边界，已写入
+    // GUARD_LIMITATIONS），也不放过"凭空新增一项技能"。
+    // —— 这正是本项目反复出现的那条纪律：**放宽前必须逐条对比编造侧**。
+    'internationalization',
+    'localization',
   ].map((w) => w.toLowerCase()),
 )
 
@@ -2314,17 +2328,34 @@ export function verifyRewrite({ original, rewritten, claimedKeywords } = {}) {
    * @returns {boolean} 是否属于"原文缩写的展开"
    */
   const isExpansionOfOriginalAcronym = (rewritten, entity, original) => {
-    // 原文里的全大写缩写（≥2 个大写字母、无小写）
     /** @type {string[]} */
     const found = (original.match(/\b[A-Z][A-Z0-9]{1,7}\b/g) ?? []).filter((a) =>
       /^[A-Z][A-Z0-9]*$/.test(a),
     )
-    const acronyms = [...new Set(found)]
+    // 数字式缩写（`K8s`、`i18n`）：首字母 + 中间字母数 + 尾字母。
+    // 判据是**可验证的**：全称长度须等于 数字+2，且首尾字母相符，
+    // 因此不会像"首字母拼写"那样被普通单词蹭到。
+    /** @type {string[]} */
+    const numericAcronyms = (original.match(/\b[A-Za-z]\d{1,2}[A-Za-z]\b/g) ?? []).filter(
+      (a) => /^[A-Za-z]\d{1,2}[A-Za-z]$/.test(a),
+    )
+    const acronyms = [...new Set([...found, ...numericAcronyms])]
     if (acronyms.length === 0) return false
     /** @type {string[]} */
     const words = rewritten.match(/[A-Za-z][A-Za-z-]*/g) ?? []
     const at = words.indexOf(entity)
     if (at < 0) return false
+    // 数字式缩写：本词本身就是其全称
+    for (const ac of numericAcronyms) {
+      const m = /^([A-Za-z])(\d{1,2})([A-Za-z])$/.exec(ac)
+      if (m === null) continue
+      const [, head, count, tail] = m
+      const total = Number(count) + 2
+      const w = entity.toLowerCase()
+      if (w.length === total && w.startsWith(head.toLowerCase()) && w.endsWith(tail.toLowerCase())) {
+        return true
+      }
+    }
     for (const ac of acronyms) {
       // **窗口按"贡献的大写字母数"切，而不是按词数。**
       //

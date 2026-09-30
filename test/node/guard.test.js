@@ -1778,8 +1778,35 @@ describe('守卫：结构性判据不得放掉真编造（另一侧锁定）', (
     }
   })
 
-  test('但缩写豁免不得被"字面缩写"蹭到（实测抓出的严重漏报）', () => {
-    // 判据若写成"短语的大写字母拼起来等于缩写"，会出现这种错配：
+  test('数字式缩写（K8s / i18n）的缩写表达式必须放行', () => {
+    // 判据可验证：全称长度须等于 数字+2，且首尾字母相符。
+    // 因此不会像"首字母拼写"那样被普通单词蹭到（见下方反向用例）。
+    for (const [original, rewritten] of [
+      ['- Deployed on K8s', '- Deployed on Kubernetes'],
+      ['- Added i18n support', '- Added internationalization support'],
+    ]) {
+      const report = verifyRewrite({ original, rewritten })
+      assert.deepEqual(
+        report.findings.filter((f) => f.severity === 'error').map((f) => f.code),
+        [],
+        `数字式缩写的全称改写不得拒绝导出：${rewritten}`,
+      )
+    }
+  })
+
+  test('但数字式缩写不得成为编造技术的通道', () => {
+    // 反向锁定：`K8s → Kafka` 首尾虽是 K/s，但长度 5 ≠ 8+2，必须拦。
+    for (const [original, rewritten] of [
+      ['- Deployed on K8s', '- Deployed on Kafka'],
+      ['- Deployed on Docker', '- Deployed on Docker and Kubernetes'],
+    ]) {
+      const report = verifyRewrite({ original, rewritten })
+      const blocked = !report.ok || report.findings.some((f) => f.code === 'FABRICATED_ENTITY')
+      assert.ok(blocked, `不得借数字式缩写放过编造：${rewritten}`)
+    }
+  })
+
+  test('但缩写豁免不得被"字面缩写"蹭到（实测抓出的严重漏报）', () => {    // 判据若写成"短语的大写字母拼起来等于缩写"，会出现这种错配：
     //   原文有 `REST`；改写 `- 使用 REST ... redis ... mysql ...`
     //   取 4 词窗口 `["REST","redis","mysql","s"]`，其大写字母正好是 REST
     //   → `redis`/`mysql` 被当成"REST 的展开"而放行。
