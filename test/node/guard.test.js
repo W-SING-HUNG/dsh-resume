@@ -21,6 +21,8 @@ import {
   extractDateTokens,
   verifyKeywordCoverage,
   detectNovelUnits,
+  detectSelfAttestation,
+  matchUnitsToOriginal,
   verifyRewrite,
 } from '../../src/guard.js'
 
@@ -75,6 +77,42 @@ describe('守卫：文本与 token 提取', () => {
     assert.ok(!names.has('Developed'), '行首词不应计入（无法区分句首大写）')
     assert.ok(!names.has('using'), '通用词不应计入')
     assert.ok(names.has('React'), '技术专名应计入')
+  })
+
+  // ── 中文行里的技术专名（外部审查发现的 S1-2，回归锁定）─────────────
+  //
+  // 缺陷背景：早期实现只认"首字母大写 + 跳过行首词"，于是真实中文简历上
+  // 这道检查**完全空转**（项目自己 demo 的 originalEntities 为 0）：
+  //   - `Vue2 → React` 技术栈替换零告警（React 大写，但 Vue2 落在行首被跳过）
+  //   - `redis / mysql / kafka` 全小写技术名一个都不认
+  // 而中文简历里这两种形态都是主流写法。
+  test('中文行：行首与小写技术名都必须被识别', () => {
+    const names = extractLatinProperNouns('- 使用 Vue2 编写展示页面，配合 redis 与 mysql 存储数据')
+    assert.ok(names.has('Vue2'), '行首的拉丁技术名必须被识别（中文行没有句首大写问题）')
+    assert.ok(names.has('redis'), '全小写技术名必须被识别')
+    assert.ok(names.has('mysql'), '全小写技术名必须被识别')
+  })
+
+  test('中文行：普通英文词不得被误报为专名', () => {
+    const names = extractLatinProperNouns('- 负责 team 的 design review，参加 remote 会议')
+    for (const w of ['team', 'design', 'review', 'remote']) {
+      assert.ok(!names.has(w), `普通英文词 ${w} 不应被当作专名（误报会让守卫被忽略）`)
+    }
+  })
+
+  test('数字加单位的写法不得被误报为专名（实测噪声）', () => {
+    // `2.4s` / `1.8s` 这类 token 也含字母，第一版修复曾把它们收进来，
+    // 导致合法的"秒 → 毫秒"换算触发 FABRICATED_ENTITY 误报。
+    const names = extractLatinProperNouns('- 将首屏加载从 2.4s 缩短至 1.8s，内存降至 512MB')
+    assert.ok(!names.has('2.4s'), '数字开头的单位写法不是专名')
+    assert.ok(!names.has('1.8s'), '数字开头的单位写法不是专名')
+    assert.ok(!names.has('512MB'), '数字开头的单位写法不是专名')
+  })
+
+  test('英文行仍保持保守规则（不因中文行的放宽而引入误报）', () => {
+    const names = extractLatinProperNouns('Developed features using React and PostgreSQL')
+    assert.ok(!names.has('Developed'), '英文行的行首词仍应跳过')
+    assert.ok(names.has('React'))
   })
 })
 
@@ -556,5 +594,1198 @@ describe('守卫：防误报（误报会让守卫被忽略，比漏报更糟）'
       rewritten: '提升 40%，累计服务 12,000 名用户。',
     })
     assert.equal(report.ok, true, '同一数字的写法变化不得误报')
+  })
+})
+
+// ── 外部验收发现的 S1-2 / S2-1，回归锁定 ────────────────────────────
+//
+// 【为什么这组用例必须用"真实长度的简历文本"】
+// 第二十七轮的教训已固化：既有守卫用例**全部是单行文本**，
+// 因此真实简历上的问题从未被覆盖——流水线全绿而产品不可用。
+// S1-2 与 S2-1 都是"单行测不出、真实简历上成立"的缺陷，
+// 所以这组用例刻意使用多行、含多项经历的简历文本。
+describe('守卫：真实简历文本上的专名与技术栈检查（S1-2）', () => {
+  /** 真实形态的中文简历（含小写技术名与行首技术名）。 */
+  const RESUME = [
+    '姓名：示例候选人',
+    '联系方式：138-0000-0000 | candidate@example.com',
+    '',
+    '专业技能：',
+    '- HTML / CSS / JavaScript（ES6）',
+    '- Vue2（组件化开发、Vuex 状态管理）',
+    '',
+    '项目经历：',
+    '校园二手交易平台（前端负责人，2026.03 - 2026.06）',
+    '- 使用 Vue2 编写主要展示页面和商品列表模块；',
+    '- 对接后端 REST 接口，完成登录与购物车功能；',
+    '- 使用 Vuex 管理用户登录态与购物车数据；',
+    '- 通过懒加载商品图片与合并请求，将首屏加载时间从 2.4s 缩短至 1.8s。',
+  ].join('\n')
+
+  test('这道检查在真实简历上不得空转（曾产出 originalEntities: 0）', () => {
+    const report = verifyRewrite({ original: RESUME, rewritten: RESUME })
+    assert.ok(
+      report.stats.originalEntities > 0,
+      '真实中文简历必须能提取出技术专名，否则该检查等于不存在',
+    )
+    assert.ok(
+      extractLatinProperNouns(RESUME).has('Vue2'),
+      '行首的 Vue2 必须被识别',
+    )
+  })
+
+  test('技术栈替换必须被抓住：Vue2 → React', () => {
+    const rewritten = RESUME.replace('使用 Vue2 编写', '使用 React 编写')
+    const report = verifyRewrite({ original: RESUME, rewritten })
+    assert.equal(report.ok, false, '换掉技术栈是事实性改动，必须报错')
+    assert.ok(report.findings.some((f) => f.code === 'FABRICATED_ENTITY'))
+  })
+
+  test('小写技术名被编造必须被抓住：redis / mysql', () => {
+    const rewritten = RESUME.replace(
+      '- 使用 Vuex 管理用户登录态与购物车数据；',
+      '- 使用 redis 与 mysql 管理用户登录态与购物车数据；',
+    )
+    const report = verifyRewrite({ original: RESUME, rewritten })
+    assert.equal(report.ok, false, '原文没有的技术名不得凭空出现')
+    assert.ok(report.findings.some((f) => f.code === 'FABRICATED_ENTITY'))
+  })
+
+  test('行首补一个原文没有的技术名必须被抓住：TypeScript', () => {
+    const rewritten =
+      '- TypeScript 工程化改造，' + RESUME.split('\n').slice(4).join('\n')
+    const report = verifyRewrite({ original: RESUME, rewritten })
+    assert.equal(
+      report.ok,
+      false,
+      '行首插入的技术名（中文语序下拉丁词天然在行首）必须被抓住',
+    )
+  })
+
+  // ── 短技术栈缩写的替换/编造必须被抓住（本轮实测抓出的真实漏报）────────
+  //
+  // 【为什么专门测这一组】
+  // 为消除 `CI/CD` 类误报，我曾把"长度 ≤ 4 的全大写缩写"一律降级为 warn，
+  // 结果**修过头**：`CSS → SCSS`、凭空加 `SQL`/`Kotlin` 都变成 ok=true，
+  // 等于放行"把没学过的技术写进简历"。现改为受限白名单（只降级
+  // `API`/`SDK`/`UX` 这类泛指缩写），可验证的技术栈仍判 error。
+  //
+  // 另有一个更隐蔽的根因：`isKnownEntity` 的双向**包含判定**把
+  // `SCSS` 当成"已知实体"（因为 `'scss'.includes('css')`）。
+  // 拉丁专名是完整 token，必须精确比对——这组用例同时锁定这一点。
+  test('短技术栈缩写替换必须被抓住：CSS → SCSS（含子串陷阱）', () => {
+    const rewritten = RESUME.replace('CSS', 'SCSS')
+    const report = verifyRewrite({ original: RESUME, rewritten })
+    assert.equal(
+      report.ok,
+      false,
+      'CSS → SCSS 是技术栈替换；不得因 SCSS 含子串 CSS 而被判为"已知实体"',
+    )
+    assert.ok(report.findings.some((f) => f.code === 'FABRICATED_ENTITY'))
+  })
+
+  test('短技术栈缩写编造必须被抓住：凭空加 SQL / Kotlin', () => {
+    for (const tech of ['SQL', 'Kotlin', 'Redis']) {
+      const rewritten = RESUME.replace(
+        '- 使用 Vuex 管理用户登录态与购物车数据；',
+        `- 熟悉 ${tech}；\n- 使用 Vuex 管理用户登录态与购物车数据；`,
+      )
+      const report = verifyRewrite({ original: RESUME, rewritten })
+      assert.equal(report.ok, false, `凭空加 ${tech} 必须被判为编造`)
+    }
+  })
+
+  test('真正的泛指缩写仍降级为 warn（不得因收紧而重新造成死锁）', () => {
+    // 反向锁定：收紧"短缩写"不得把 SDK/UX/API 这类等价写法重新判成 error。
+    //
+    // 注意用例构造：必须把缩写**写进既有条目**（等价术语替换的典型形态），
+    // 而不是新加一整条经历——后者会（正确地）触发 NOVEL_CONTENT，
+    // 那是另一个检查项，会把本用例要验证的点掩盖掉。
+    for (const term of ['SDK', 'API', 'UX']) {
+      const rewritten = RESUME.replace(
+        '- HTML / CSS / JavaScript（ES6）',
+        `- HTML / CSS / JavaScript（ES6），熟悉 ${term} 相关流程`,
+      )
+      const report = verifyRewrite({ original: RESUME, rewritten })
+      assert.deepEqual(
+        report.findings.filter((f) => f.severity === 'error').map((f) => f.code),
+        [],
+        `${term} 是泛指缩写，不得阻断交付`,
+      )
+      assert.ok(
+        report.findings.some((f) => f.code === 'AMBIGUOUS_NEW_TERM'),
+        `${term} 必须留下 warn 提示，不能静默放行`,
+      )
+    }
+  })
+
+  test('具体平台/技术即使短也仍是 error（白名单不得过宽）', () => {
+    // 白名单只收"通用概念"，不收"具体平台与具体技术"。
+    // 这些词凭空出现就是实打实的编造——写进简历会被面试官问穿。
+    //
+    // 注意：不能拿 `CSS` 当反例——它**本来就在 fixture 原文里**
+    // （`HTML / CSS / JavaScript`），凭空出现的是别的技术名。
+    for (const tech of ['AWS', 'GCP', 'JVM', 'SSD', 'GPU', 'SQL', 'Kotlin']) {
+      const rewritten = RESUME.replace(
+        '- HTML / CSS / JavaScript（ES6）',
+        `- HTML / CSS / JavaScript（ES6），熟悉 ${tech}`,
+      )
+      const report = verifyRewrite({ original: RESUME, rewritten })
+      assert.equal(report.ok, false, `${tech} 是可验证的具体技术/平台，不得降级放行`)
+      assert.ok(report.findings.some((f) => f.code === 'FABRICATED_ENTITY'))
+    }
+  })
+
+  test('拉丁专名精确比对：原文已有的技术名加修饰语不得误拦', () => {
+    // 反向保障：把包含判定从拉丁专名上移除后，
+    // "给已有技术名加修饰/后缀"这类合法改写仍须放行（否则是新死锁）。
+    const original = '- 熟悉 Redis 缓存与 MySQL 数据库的使用；\n- 使用 Vue2 编写主要展示页面；'
+    for (const [from, to] of [
+      ['- 熟悉 Redis 缓存与 MySQL 数据库的使用；', '- 熟悉 Redis 集群与 MySQL 数据库的使用；'],
+      ['- 使用 Vue2 编写主要展示页面；', '- 使用 Vue2 组件化开发主要展示页面；'],
+      ['- 熟悉 Redis 缓存与 MySQL 数据库的使用；', '- 熟练使用 redis 缓存并掌握 MySQL 数据库；'],
+    ]) {
+      const report = verifyRewrite({ original, rewritten: original.replace(from, to) })
+      assert.deepEqual(
+        report.findings.filter((f) => f.severity === 'error').map((f) => f.code),
+        [],
+        `已有技术名加修饰是合法改写：${to}`,
+      )
+    }
+  })
+
+  // ── 「截断替换」必须被抓住（独立审查抓出：我的精确比对只做了一半）────────
+  //
+  // 根因：`appearsIn` 用的是**整篇原文的裸子串判定**
+  // （`haystack.toLowerCase().includes(candidate.toLowerCase())`）。
+  // 我把"与实体集合比对"改成精确匹配时**漏掉了这条短路**，
+  // 于是从已有技术名里截掉一段仍被放行：
+  //   `JavaScript` → `Java`（`'javascript'.includes('java')` 为真）
+  // 现已改为带 token 边界的匹配。这组用例锁定该修复。
+  test('从已有技术名截断的替换必须被抓住', () => {
+    for (const [tech, truncated] of [
+      ['JavaScript', 'Java'],
+      ['PostgreSQL', 'Postgres'],
+      ['MongoDB', 'Mongo'],
+      ['ReactNative', 'React'],
+    ]) {
+      const report = verifyRewrite({
+        original: `- 使用 ${tech} 实现核心功能；`,
+        rewritten: `- 使用 ${truncated} 实现核心功能；`,
+      })
+      assert.equal(
+        report.ok,
+        false,
+        `${tech} → ${truncated} 是截断换名（技术栈已不同），不得因裸子串包含而放行`,
+      )
+    }
+  })
+
+  test('截断到"普通英文词"时至少留 warn，不得静默放行（已声明的边界）', () => {
+    // `Script` 命中普通英文词表（'script'），故只降级为 warn 而非 error。
+    // 这是刻意的取舍：把 `script` 移出词表会误伤"自动化脚本"这类正常写法，
+    // 而误报会让用户拿不到文件（本项目最严重的一类缺陷）。
+    // 该边界已写入 GUARD_LIMITATIONS——此处锁定"至少有提示"。
+    const report = verifyRewrite({
+      original: '- 熟悉 TypeScript 开发；',
+      rewritten: '- 熟悉 Script 开发；',
+    })
+    assert.ok(
+      report.findings.length > 0,
+      '即使不判 error，也必须留下提示，不能静默放行',
+    )
+  })
+
+  test('通用工程/岗位缩写不得阻断交付（死锁扫描抓出：CI 曾被判编造）', () => {
+    // 真实场景：把"持续集成"写成"持续集成（CI）"是 ATS 对齐的常见动作。
+    // 早期实现把 `CI` 判为 FABRICATED_ENTITY 并**拒绝导出**——
+    // 与 `CI/CD` 记号形态属同一类等价术语替换，只是写法不同。
+    const original = '- 负责持续集成与自动化部署流程的搭建；\n- 负责接口开发工作；'
+    for (const term of ['CI', 'CD', 'TDD', 'QA', 'PM', 'DevOps']) {
+      const rewritten = original.replace(
+        '- 负责持续集成与自动化部署流程的搭建；',
+        `- 负责${term}（持续集成）与自动化部署流程的搭建；`,
+      )
+      const report = verifyRewrite({ original, rewritten })
+      assert.deepEqual(
+        report.findings.filter((f) => f.severity === 'error').map((f) => f.code),
+        [],
+        `${term} 是通用工程缩写，等价术语替换不得阻断交付`,
+      )
+    }
+  })
+
+  test('原文已有的技术名重复出现不得误报（防止检查变成噪声源）', () => {
+    const rewritten = RESUME.replace(
+      '- 使用 Vuex 管理用户登录态与购物车数据；',
+      '- 使用 Vuex 管理用户登录态与购物车数据，并沉淀 Vuex 模块化经验；',
+    )
+    const report = verifyRewrite({ original: RESUME, rewritten })
+    assert.deepEqual(
+      report.findings.filter((f) => f.severity === 'error').map((f) => f.code),
+      [],
+      '原文已有的技术名不得被报为新增',
+    )
+  })
+
+  test('单位换算不得被误报为新增专名（2.4s → 2400ms）', () => {
+    const rewritten = RESUME.replace('2.4s 缩短至 1.8s', '2400ms 缩短至 1800ms')
+    const report = verifyRewrite({ original: RESUME, rewritten })
+    assert.ok(
+      !report.findings.some((f) => f.code === 'FABRICATED_ENTITY'),
+      '带单位的时间数值不是专名，不得误报',
+    )
+  })
+})
+
+// ── 结构性判据：区分"ATS 等价注记"与"新增技能主张" ───────────────────
+//
+// 【为什么这组用例是本轮最重要的回归】
+// 前几版靠**枚举名单**决定某个拉丁词判 error 还是 warn。独立审查实测证明
+// 这条路走不通：20 个最典型的"中文术语 → 英文缩写"ATS 对齐动作里
+// **13 个仍被拒绝导出**（`超文本传输协议` → `HTTP`、`结构化查询语言` → `SQL`…），
+// 因为该组合是**开放集合**，枚举必然滞后
+//（与本项目 check-secrets 早已吸取的教训同构：那里也改成让 git 回答）。
+//
+// 现改为**结构性判据**（逐对比较改写单元与原文单元）：
+//   ① 原有技术名消失            → 替换      → error
+//   ② 处于括号/斜杠并列注记位    → ATS 等价  → warn（放行）
+//   ③ 中文字数显著增长          → 新增主张  → error
+//   ④ 原文该句无中文却多出技术名 → 新增主张  → error
+//   ⑤ 用连接词并进列表          → 新增主张  → error
+//   ⑥ 只出现在无法对齐的短行里   → 新增主张  → error
+// 这组用例把两侧都钉住：**既不许死锁，也不许放掉编造**。
+describe('守卫：ATS 等价注记必须放行（不得死锁）', () => {
+  /** 最典型的 20 个「中文术语 → 英文缩写」对齐动作。 */
+  const ATS_ALIGNMENTS = [
+    ['超文本传输协议', 'HTTP'],
+    ['超文本传输安全协议', 'HTTPS'],
+    ['统一资源定位符', 'URL'],
+    ['安全套接层协议', 'SSL'],
+    ['可扩展标记语言', 'XML'],
+    ['令牌校验机制', 'JWT'],
+    ['接口数据格式', 'JSON'],
+    ['配置文件格式', 'YAML'],
+    ['接口设计规范', 'API'],
+    ['软件开发工具包', 'SDK'],
+    ['持续集成流程', 'CI/CD'],
+    ['网络传输协议', 'TCP/IP'],
+    ['表征状态转移架构', 'REST'],
+    ['用户界面设计', 'UI'],
+    ['关键绩效指标', 'KPI'],
+    ['结构化查询语言', 'SQL'],
+    ['层叠样式表', 'CSS'],
+    ['超文本标记语言', 'HTML'],
+    ['云服务平台', 'AWS'],
+    ['容器编排平台', 'Kubernetes'],
+  ]
+
+  for (const [zh, en] of ATS_ALIGNMENTS) {
+    test(`中文术语并列英文写法不得被拒：${zh}（${en}）`, () => {
+      // 独立审查实测：这 20 个动作里曾有 13 个被拒绝导出 = 投递死锁
+      const report = verifyRewrite({
+        original: `- 熟悉${zh}，负责接口开发工作；`,
+        rewritten: `- 熟悉${zh}（${en}），负责接口开发工作；`,
+      })
+      assert.deepEqual(
+        report.findings.filter((f) => f.severity === 'error').map((f) => f.code),
+        [],
+        `${zh} → ${en} 是 ATS 关键词对齐的常规动作，不得阻断导出`,
+      )
+    })
+  }
+
+  test('直接替换中文术语为缩写也要放行（中文数减少 = 等价写法）', () => {
+    for (const [zh, en] of [
+      ['超文本传输协议', 'HTTP'],
+      ['结构化查询语言', 'SQL'],
+      ['云服务平台', 'AWS'],
+    ]) {
+      const report = verifyRewrite({
+        original: `- 熟悉${zh}，负责接口开发工作；`,
+        rewritten: `- 熟悉 ${en}，负责接口开发工作；`,
+      })
+      assert.deepEqual(
+        report.findings.filter((f) => f.severity === 'error').map((f) => f.code),
+        [],
+        `${zh} → ${en} 属等价写法`,
+      )
+    }
+  })
+})
+
+describe('守卫：结构性判据不得放掉真编造（另一侧锁定）', () => {
+  test('技术名替换仍是 error（原有技术名消失）', () => {
+    for (const [tech, other] of [
+      ['Vue2', 'React'],
+      ['CSS', 'SCSS'],
+      ['JavaScript', 'Java'],
+      ['PostgreSQL', 'Postgres'],
+    ]) {
+      const report = verifyRewrite({
+        original: `- 使用 ${tech} 实现核心功能；`,
+        rewritten: `- 使用 ${other} 实现核心功能；`,
+      })
+      assert.equal(report.ok, false, `${tech} → ${other} 是技术栈替换，必须拦`)
+      assert.ok(report.findings.some((f) => f.code === 'FABRICATED_ENTITY'))
+    }
+  })
+
+  test('新增技能主张仍是 error（中文字数增长 / 连接词并入 / 纯拉丁行）', () => {
+    const cases = [
+      ['中文字数增长', '- 熟悉 HTML 与 CSS；', '- 熟悉 HTML 与 CSS，熟悉 SQL；'],
+      ['连接词并进列表', '- 使用 Vue2 编写页面；', '- 使用 Vue2 与 Kotlin 编写页面；'],
+      ['高置信专名并入', '- 使用 Vue2 编写主要展示页面和商品列表模块；', '- 使用 Vue2 与 Kubernetes 编写主要展示页面和商品列表模块；'],
+      ['纯拉丁行新增', '- HTML / CSS / JavaScript（ES6）', '- SQL / HTML / CSS / JavaScript（ES6）'],
+    ]
+    for (const [name, original, rewritten] of cases) {
+      const report = verifyRewrite({ original, rewritten })
+      assert.equal(report.ok, false, `${name} 属新增技能主张，必须拦下`)
+    }
+  })
+
+  test('出现在无法对齐的短行里的新技术名仍是 error', () => {
+    // `- 熟悉 SQL；` 短于内容单元阈值，无法与原文对齐——
+    // ATS 注记必须发生在可对齐的内容行上，故这是新增主张。
+    const report = verifyRewrite({
+      original: '- 使用 Vuex 管理用户登录态与购物车数据；',
+      rewritten: '- 熟悉 SQL；\n- 使用 Vuex 管理用户登录态与购物车数据；',
+    })
+    assert.equal(report.ok, false)
+    assert.ok(report.findings.some((f) => f.code === 'FABRICATED_ENTITY'))
+  })
+
+  test('中文机构名替换仍是 error（结构性判据不得只看拉丁专名）', () => {
+    // 这条由 `npm run check:guard` 抓出：结构性判据最初只比较**拉丁专名**的消失，
+    // 于是"换了一家公司"这类最典型的编造被降级成 warn。
+    // 中文机构名必须一并纳入"消失即替换"的判定。
+    const report = verifyRewrite({
+      original: '- 在某互联网公司实习，负责接口开发工作。',
+      rewritten: '- 在字节跳动公司实习，负责接口开发工作。',
+    })
+    assert.equal(report.ok, false, '换公司名是编造，必须拦下')
+    assert.ok(report.findings.some((f) => f.code === 'FABRICATED_ENTITY'))
+  })
+
+  test('替换"降级词"也必须算替换：REST → GraphQL', () => {
+    // 【为什么专门测这一条（本轮自查抓出的真实漏报）】
+    // `REST` 属被降级为 warn 的词，不在 error 级候选集里。
+    // 替换检测若只在 error 候选集里比"谁消失了"，就看不到 `REST` 消失，
+    // 于是 `REST → GraphQL` 这类**技术栈替换**被误判成"新增一个词"而降级为 warn。
+    // 现改为用**全部拉丁 token**判消失。
+    for (const [from, to] of [
+      ['REST', 'GraphQL'],
+      ['API', 'gRPC'],
+      ['UI', 'WebGL'],
+    ]) {
+      const report = verifyRewrite({
+        original: `- 对接后端 ${from} 接口，完成登录与购物车功能；`,
+        rewritten: `- 对接后端 ${to} 接口，完成登录与购物车功能；`,
+      })
+      assert.equal(
+        report.ok,
+        false,
+        `${from} → ${to} 是技术栈替换，不得因 ${from} 是降级词而漏掉`,
+      )
+      assert.ok(report.findings.some((f) => f.code === 'FABRICATED_ENTITY'))
+    }
+  })
+
+  test('冒号/顿号引出新技能不得被当作"并列注记"放行', () => {
+    // 【为什么专门测这一条（本轮自查抓出的绕过）】
+    // "并列注记位"只认**括号与斜杠**（`（HTTP）`、`/ CI`）。
+    // 若把 `：`、`、` 也算作注记位，`技能含：Redis` 这类"引出新一项"
+    // 就会被误放行。
+    for (const rewritten of [
+      '- 使用 Vuex 管理用户登录态与购物车数据，技能含：Redis；',
+      '- 使用 Vuex 管理用户登录态与购物车数据，掌握、Kafka；',
+      '- 使用 Vuex 管理用户登录态与购物车数据，另掌握 Redis 缓存。',
+    ]) {
+      const report = verifyRewrite({
+        original: '- 使用 Vuex 管理用户登录态与购物车数据；',
+        rewritten,
+      })
+      assert.equal(report.ok, false, `引出新技能必须拦下：${rewritten}`)
+    }
+  })
+
+  // ── 英文→中文的技术名替换不得静默（独立审查抓出的结构性缺口）──────────
+  //
+  // 【为什么这组用例至关重要】
+  // 替换检测原先**包在 `fabricatedEntities` 循环里**，因此只在"新增了某个拉丁实体"
+  // 时才执行。若消失的拉丁技术名被换成**纯中文表述**且没引入新拉丁词，
+  // 整段逻辑一次都不跑 → **完全静默**（实测 `ok=true`、`findings=[]`）。
+  // 而同一语义的 `CSS → SCSS` 却判 error，行为不一致。
+  //
+  // 严重级取 **warn 而非 error**：这类改动（换成中文表述 / 删掉技能）
+  // **没有凭空增加主张**，与"编造"性质不同；判 error 会拦下合法改写造成死锁。
+  test('英文技术名被改成中文表述：必须至少留 warn，不得静默', () => {
+    for (const [tech, chinese] of [
+      ['CSS', '层叠样式表'],
+      ['Vuex', '状态管理库'],
+      ['REST', '表述性状态转移'],
+    ]) {
+      const report = verifyRewrite({
+        original: `- 熟悉 ${tech} 的使用，负责接口开发工作；`,
+        rewritten: `- 熟悉${chinese}的使用，负责接口开发工作；`,
+      })
+      assert.ok(
+        report.findings.some((f) => f.code === 'VANISHED_TECH_TERM'),
+        `${tech} → ${chinese} 必须报 VANISHED_TECH_TERM，不得静默放行`,
+      )
+      assert.equal(report.ok, true, '这类改动不含凭空新增主张，不应阻断交付')
+    }
+  })
+
+  test('删掉技能也必须留下提示（同一路径，不得静默）', () => {
+    const report = verifyRewrite({
+      original: '- 熟悉 HTML / CSS / JavaScript 的使用；',
+      rewritten: '- 熟悉 HTML / JavaScript 的使用；',
+    })
+    assert.ok(
+      report.findings.some((f) => f.code === 'VANISHED_TECH_TERM'),
+      '删掉 CSS 应留下提示',
+    )
+  })
+
+  test('有新技术名接替时仍判 error（不得退化成静默 warn）', () => {
+    // 反向锁定：`VANISHED_TECH_TERM` 只负责"没有接替者"的情形；
+    // 一旦有新技术名接替，仍属技术栈替换 → error。
+    const report = verifyRewrite({
+      original: '- 熟悉 CSS 的使用，负责页面开发工作；',
+      rewritten: '- 熟悉 SCSS 的使用，负责页面开发工作；',
+    })
+    assert.equal(report.ok, false)
+    assert.ok(report.findings.some((f) => f.code === 'FABRICATED_ENTITY'))
+  })
+
+  // ── "消失"必须是全文级，不得按句判定（独立审查抓出的假告警）────────────
+  //
+  // 【为什么这组用例至关重要】
+  // 最初 `lost` 用的是 `!appearsIn(t, newUnit)`——即"**本句**里没有"。
+  // 于是**折行/拆分**（最常规的改写）会误报：
+  //   原文 `- 熟悉 Java / Spring Boot / MySQL / Redis / Kafka 的使用；`
+  //   改写 `- 熟悉 Java / Spring Boot / MySQL；` + `- 熟悉 Redis / Kafka 的使用；`
+  //   6 个词**全部仍在**（只是折到兄弟行），却被断言"6 个技术名在改写后消失"。
+  //
+  // 这是**事实错误的告警**：用户会去"补回"一个从未消失的技术名，
+  // 与本项目"不制造虚假安全感"的原则直接冲突。
+  test('技术列表折行：词仍在兄弟行，不得报"消失"（假告警）', () => {
+    const report = verifyRewrite({
+      original: '- 熟悉 Java / Spring Boot / MySQL / Redis / Kafka 的使用与调优；',
+      rewritten:
+        '- 熟悉 Java / Spring Boot / MySQL；\n- 熟悉 Redis / Kafka 的使用与调优；',
+    })
+    const vt = report.findings.find((f) => f.code === 'VANISHED_TECH_TERM')
+    assert.equal(vt, undefined, '所有技术名都仍在，不得报"消失"')
+    assert.deepEqual(
+      report.findings.filter((f) => f.severity === 'error'),
+      [],
+      '折行是合法改写，不得产生任何 error',
+    )
+  })
+
+  test('拆分/跨行搬移/合并都不得误报"技术名消失"', () => {
+    for (const [original, rewritten] of [
+      ['- 熟悉 Vue2 与 Vuex 的使用；', '- 熟悉 Vue2 的使用；\n- 熟悉 Vuex 的使用；'],
+      ['- 熟悉 Redis 缓存；\n- 熟悉 MySQL 数据库；', '- 熟悉 MySQL 数据库；\n- 熟悉 Redis 缓存；'],
+      ['- 熟悉 Redis 缓存；\n- 熟悉 MySQL 数据库；', '- 熟悉 Redis 缓存与 MySQL 数据库；'],
+    ]) {
+      const report = verifyRewrite({ original, rewritten })
+      assert.ok(
+        !report.findings.some((f) => f.code === 'VANISHED_TECH_TERM'),
+        `词都还在，不得报消失：${rewritten}`,
+      )
+    }
+  })
+
+  // ── "消失"的判定范围：既不能是本句，也不能是全篇，而是**配对组** ──────────
+  //
+  // 【为什么这组用例是本轮最关键的一条】
+  // 判"某技术名是否消失"的范围有三档，各错一边（都被实测/审查抓出）：
+  //   · 本句级：**折行**时把折到兄弟行的词误报为"被替换"，
+  //     与 ATS 注记叠加即**拒绝导出**（S1-1 同类死锁）。
+  //   · 全篇级：把"某行偷偷换掉技术名、而技能区恰好还留着旧名"的替换**漏掉**
+  //     —— `Vue2 → React` 因技能区仍有 `Vue2` 而被放行。
+  //   · 配对组级（当前实现）：折行 = 同一句话分散到多行，词仍在组内 → 放行；
+  //     句内换成别的词 → 组内确实没了 → 判替换。
+  test('折行 + 新增技术名不得被误判为"替换"（本句级会误报并拒绝导出）', () => {
+    const report = verifyRewrite({
+      original: '- 熟悉 Java / MySQL 的使用；',
+      rewritten: '- 熟悉 Java；\n- 熟悉 MySQL 与 Redis 的使用；',
+    })
+    // 真正的编造是"多了 Redis"，但绝不能断言"Java 被替换掉了"
+    const fe = report.findings.find((f) => f.code === 'FABRICATED_ENTITY')
+    assert.ok(
+      fe === undefined || !/Java/.test(String(fe.message)),
+      'Java 仍在改写结果中，不得被断言为"被替换"',
+    )
+  })
+
+  test('折行 + ATS 注记必须可导出（与不折行的行为一致）', () => {
+    const original = '- 熟悉 Java / MySQL / 超文本传输协议 的使用；'
+    const notWrapped = '- 熟悉 Java / MySQL / 超文本传输协议（HTTP）的使用；'
+    const wrapped = '- 熟悉 Java / MySQL 的使用；\n- 熟悉超文本传输协议（HTTP）的使用；'
+    for (const rewritten of [notWrapped, wrapped]) {
+      const report = verifyRewrite({ original, rewritten })
+      assert.deepEqual(
+        report.findings.filter((f) => f.severity === 'error').map((f) => f.code),
+        [],
+        `ATS 注记是合法改写，折行与否都不得拒绝导出：${rewritten}`,
+      )
+    }
+  })
+
+  test('同一技术名在多处出现时，句中换词仍须判替换（全篇级会漏报）', () => {
+    // 技能区保留 Vue2、项目行悄悄换成 React —— 简历自相矛盾，属编造。
+    const report = verifyRewrite({
+      original: '- 技能：\n- Vue2\n\n项目：\n- 使用 Vue2 编写主要展示页面；',
+      rewritten: '- 技能：\n- Vue2\n\n项目：\n- 使用 React 编写主要展示页面；',
+    })
+    assert.equal(
+      report.ok,
+      false,
+      '技能区留着 Vue2、项目行换成 React，必须拦下（不得因全文仍有 Vue2 而放行）',
+    )
+    assert.ok(report.findings.some((f) => f.code === 'FABRICATED_ENTITY'))
+  })
+
+  // ── 「追加一整行编造技能」必须拦下，不得随句式/排版漂移 ────────────────
+  //
+  // 【为什么这组用例至关重要（独立审查抓出、对任意词成立的绕过）】
+  // 新增技能的严重级原借用"中文字数增长比"作代理信号，于是**随排版漂移**：
+  // ```
+  //   原文：- 熟悉 Java 与 MySQL 的使用；
+  //   改写：- 熟悉 Java 与 MySQL 的使用；
+  //         - 熟悉 Redis 的使用；        ← 凭空多写的一项技能
+  // ```
+  // 新行汉字 5、配对原句汉字 6 → 增长比 −0.167 → 落进"中文换缩写"的等价档
+  // → 只报 warn → **`exportResume` 实测导出成功且 `verified=true`**。
+  // 固定句式只换技术名，**6/6 全部可绕过**。
+  // 而"多加一行技能"正是本项目最该拦的编造类型。
+  //
+  // 现改为**结构性判据**（归属关系）：配对原句的内容已被一个几乎逐字相同的
+  // 兄弟句完整保留，而本句多出原文全篇都没有的技术名 → 本句是纯增量 → error。
+  test('追加一整行编造技能必须拦下（最短句式也不得放行）', () => {
+    for (const tech of ['Redis', 'Docker', 'Golang', 'Kotlin', 'Consul', 'Kafka']) {
+      const report = verifyRewrite({
+        original: '专业技能：\n- 熟悉 Java 与 MySQL 的使用；',
+        rewritten: `专业技能：\n- 熟悉 Java 与 MySQL 的使用；\n- 熟悉 ${tech} 的使用；`,
+      })
+      assert.equal(
+        report.ok,
+        false,
+        `凭空多写一行「熟悉 ${tech}」必须拦下（不得因句式短而放行）`,
+      )
+      assert.ok(report.findings.some((f) => f.code === 'FABRICATED_ENTITY'))
+    }
+  })
+
+  test('编造技能不得因排版形状不同而漂移（同一语义应在所有形状下都拦）', () => {
+    const shapes = [
+      '- 熟悉 Java 与 MySQL 与 Redis 的使用；',
+      '- 熟悉 Java 与 MySQL 的使用；\n- 熟悉 Redis；',
+      '- 熟悉 Java 与 MySQL 的使用；\n- 熟悉 Redis 的使用；',
+      '- 熟悉 Java 与 MySQL 的使用；\n- 熟悉 Redis 缓存的使用；',
+      '- 熟悉 Java 与 MySQL 的使用；\n- 熟练掌握 Redis 的使用；',
+    ]
+    for (const body of shapes) {
+      const report = verifyRewrite({
+        original: '专业技能：\n- 熟悉 Java 与 MySQL 的使用；',
+        rewritten: `专业技能：\n${body}`,
+      })
+      assert.equal(report.ok, false, `新增 Redis 在任何排版下都必须拦：${body}`)
+    }
+  })
+
+  test('而合法的 ATS 注记/缩写收缩任何形状下都必须放行', () => {
+    const original = '专业技能：\n- 熟悉超文本传输协议，负责接口开发工作；'
+    // 合法形态：① 括号注记 ② 句中直接换成缩写（收缩写法）。
+    // 注意**不包含**"另起一行只写 `- 熟悉 HTTP；`"——那一形态与
+    // "另起一行只写 `- 熟悉 Redis；`"在文本上完全相同（都是"独立新行 + 无注记位"），
+    // 而后者是本项目最该拦的编造。纯文本无法知道 `HTTP` 与前者同义，
+    // 故该形态一律判 error（宁可让用户把缩写写进原句，也不放行编造）。
+    for (const body of [
+      '- 熟悉超文本传输协议（HTTP），负责接口开发工作；',
+      '- 熟悉 HTTP，负责接口开发工作；',
+      '- 熟悉超文本传输协议 / HTTP，负责接口开发工作；',
+    ]) {
+      const report = verifyRewrite({
+        original,
+        rewritten: `专业技能：\n${body}`,
+      })
+      assert.deepEqual(
+        report.findings.filter((f) => f.severity === 'error').map((f) => f.code),
+        [],
+        `ATS 等价写法不得阻断交付：${body}`,
+      )
+    }
+  })
+
+  test('独立的"只写缩写"新行按新增技能处理（与编造无法区分，故拦截）', () => {
+    // 已知取舍：`- 熟悉 HTTP；` 单起一行会被判 error，因为它在文本上与
+    // `- 熟悉 Redis；`（编造）完全无法区分。此时正确做法是把缩写并入原句
+    // （写成 `- 熟悉超文本传输协议（HTTP）…`），那是被放行的。
+    const report = verifyRewrite({
+      original: '专业技能：\n- 熟悉超文本传输协议，负责接口开发工作；',
+      rewritten: '专业技能：\n- 熟悉超文本传输协议，负责接口开发工作；\n- 熟悉 HTTP；',
+    })
+    assert.equal(
+      report.ok,
+      false,
+      '与编造形态不可区分的写法必须拦截（宁可要求并入原句）',
+    )
+  })
+
+  // ── 注记位定位必须按 token 边界（独立审查抓出的真实误报/死锁）──────────
+  //
+  // 【缺陷背景】`isInlineAnnotation` 原用 `unit.indexOf(entity)` 定位新词。
+  // 当 `entity` 是句中已出现词的**子串**时会定位到错误位置：
+  // `熟悉 MySQL / 结构化查询语言（SQL）` 里 `indexOf('sql')` 命中 **`MySQL` 内部**，
+  // 于是取到前文 `" My"` 而非 `"（"` → 合法的 `（SQL）` 注记被判"新增技能"
+  // 并**拒绝导出**。`MySQL` 与 `SQL` 同现恰是简历最常见的组合。
+  test('已出现词的子串不得干扰注记位定位：MySQL + （SQL）', () => {
+    for (const [original, rewritten] of [
+      ['- 熟悉 MySQL / 结构化查询语言 的使用；', '- 熟悉 MySQL / 结构化查询语言（SQL）的使用；'],
+      ['- 熟悉 NoSQL / 结构化查询语言 的使用；', '- 熟悉 NoSQL / 结构化查询语言（SQL）的使用；'],
+    ]) {
+      const report = verifyRewrite({ original, rewritten })
+      assert.deepEqual(
+        report.findings.filter((f) => f.severity === 'error').map((f) => f.code),
+        [],
+        `合法的（SQL）注记不得被拒（子串碰撞）：${rewritten}`,
+      )
+    }
+  })
+
+  test('注记位判据对全部常见 ATS 词一致生效', () => {
+    for (const [zh, en] of [
+      ['结构化查询语言', 'SQL'],
+      ['超文本传输协议', 'HTTP'],
+      ['持续集成流程', 'CI'],
+      ['接口设计规范', 'API'],
+      ['云服务平台', 'AWS'],
+    ]) {
+      const report = verifyRewrite({
+        original: `- 熟悉 MySQL / ${zh} 的使用；`,
+        rewritten: `- 熟悉 MySQL / ${zh}（${en}）的使用；`,
+      })
+      assert.deepEqual(
+        report.findings.filter((f) => f.severity === 'error').map((f) => f.code),
+        [],
+        `${en} 的括号注记不得被拒`,
+      )
+    }
+  })
+
+  // ── "收缩写法"不得成为"另起一行新增技能"的挡箭牌（第四次绕过后的根本约束）──
+  //
+  // 【为什么这组用例至关重要】
+  // "中文字数下降"是**相对配对句**算的，而共享套话（`熟悉…的使用；`）会把编造行
+  // 配到一条**更长的中文原句**上，于是"比它短 7 个汉字"被误当成"中文换缩写"：
+  // ```
+  //   原文：- 熟悉结构化查询语言 的使用；      （汉字 12）
+  //   改写：- 熟悉结构化查询语言 的使用；      （原句逐字保留）
+  //         - 熟悉 Redis 的使用；              （汉字 5，下降 7 ≥ 阈值 4）
+  // ```
+  // → 只报 warn → **`exportResume` 导出成功且 `verified=true`**。
+  // 真实简历技能区正是这种长中文句，故触发面很广（6 种长句 × 4 技术名全部可绕过）。
+  //
+  // **根本约束**："收缩"只能解释"原有内容变短了"，
+  // **不能解释"原文内容仍原封不动、同时又多出一句"**。
+  // 故要求：只有配对原句的中文**没有被其它改写行成段保留**时，
+  // 才允许按"收缩"放行。
+  test('长中文原句 + 另起一行编造技能，必须拦下（收缩不得成为挡箭牌）', () => {
+    for (const zh of [
+      '结构化查询语言',
+      '超文本传输协议',
+      '关系型数据库',
+      '容器编排平台',
+      '持续集成部署流程',
+    ]) {
+      for (const tech of ['Redis', 'Kafka', 'Docker', 'Nginx']) {
+        const report = verifyRewrite({
+          original: `- 熟悉${zh} 的使用；`,
+          rewritten: `- 熟悉${zh} 的使用；\n- 熟悉 ${tech} 的使用；`,
+        })
+        assert.equal(
+          report.ok,
+          false,
+          `原句仍在、另起一行新增 ${tech} 必须是 error（不得因"比原句短"而放行）`,
+        )
+        assert.ok(report.findings.some((f) => f.code === 'FABRICATED_ENTITY'))
+      }
+    }
+  })
+
+  test('真正的收缩写法（中文换缩写）仍须放行', () => {
+    // 反向锁定：加了"保留检查"后，真收缩（原句被本行替换掉）必须仍放行。
+    for (const [original, rewritten] of [
+      ['- 熟悉超文本传输协议，负责接口开发工作；', '- 熟悉 HTTP，负责接口开发工作；'],
+      ['- 熟悉结构化查询语言，负责接口开发工作；', '- 熟悉 SQL，负责接口开发工作；'],
+      ['- 熟悉云服务平台，负责接口开发工作；', '- 熟悉 AWS，负责接口开发工作；'],
+    ]) {
+      const report = verifyRewrite({ original, rewritten })
+      assert.deepEqual(
+        report.findings.filter((f) => f.severity === 'error').map((f) => f.code),
+        [],
+        `真收缩不得阻断交付：${rewritten}`,
+      )
+    }
+  })
+
+
+  // ── 容量单位大小写（bit vs byte 相差 8 倍）────────────────────────────
+  //
+  // 【为什么单列（独立审查发现）】单位归一化表用了大小写不敏感的正则，
+  // 于是 `2MB`（兆字节）与 `2Mb`（兆比特）被归一为同一数值——但二者相差 **8 倍**。
+  // 实测此前 `2MB → 2Mb` 是 `ok=true`、`findings=[]`（**完全静默**），
+  // 比 `HTML → 标记语言`（至少 warn）还宽松，标准不一致。
+  //
+  // 取 warn 而非 error：`KB/kb`、`MB/mb` 混写在简历里很常见、多半同义，
+  // 判 error 会误报死锁；但 bit/byte 确实语义不同，必须提示。
+  test('短行里的技术名替换也不得静默（< 8 字单元不在逐条比对范围）', () => {
+    // 【为什么专门测（本轮自查抓出的残留静默）】
+    // "技术名消失"的逐条比对只走**内容单元**（长度 ≥ 8 字），
+    // 于是短行里的替换完全无告警：
+    //   `- CSS；` → `- 层叠样式表；`   实测 `ok=true`、`findings=[]`
+    // `- 熟悉 CSS；` → `- 熟悉层叠样式表；` 同样静默。
+    // 而"技能：CSS"这类短行正是简历里最常见的形态。
+    // 现已补全文级兜底扫描。
+    for (const [original, rewritten] of [
+      ['- CSS；', '- 层叠样式表；'],
+      ['- 熟悉 CSS；', '- 熟悉层叠样式表；'],
+      ['- CSS / HTML；', '- 层叠样式表 / HTML；'],
+    ]) {
+      const report = verifyRewrite({ original, rewritten })
+      assert.ok(
+        report.findings.length > 0,
+        `短行技术名替换不得静默：${original} → ${rewritten}`,
+      )
+    }
+  })
+
+  // ── 短行：同一个分支的两侧（最易"修一边漏一边"，本轮最后一次收敛）────
+  //
+  // 【为什么必须成对测】
+  // 内容单元阈值（≥ 8 字）会把短行过滤掉，使 `- 熟悉 SQL；`（6 字）拿不到配对原句。
+  // 这个兜底分支两侧都不能一刀切：
+  //   · 一律判 error → 短行把中文换成缩写（最核心的 ATS 动作）被拒，
+  //     实测 20 个常见术语里 **16 个导不出** = 死锁；
+  //   · 一律放行 → 短行里的编造（`- 熟悉 Redis；`）被投递出去 = 严重绕过。
+  // 而这两者在**文本上完全相同**（都是 `- 熟悉 X；`），
+  // 区别只在**原文侧**：原句是否已被本行替换掉。
+  test('短行「中文术语 → 英文缩写」必须放行（20 个常见 ATS 术语）', () => {
+    const ATS_PAIRS = [
+      ['超文本传输协议', 'HTTP'],
+      ['超文本安全传输协议', 'HTTPS'],
+      ['统一资源定位符', 'URL'],
+      ['安全套接层协议', 'SSL'],
+      ['可扩展标记语言', 'XML'],
+      ['令牌校验机制', 'JWT'],
+      ['接口数据格式', 'JSON'],
+      ['配置文件格式', 'YAML'],
+      ['持续集成流程', 'CI/CD'],
+      ['网络传输协议', 'TCP/IP'],
+      ['表征状态转移架构', 'REST'],
+      ['结构化查询语言', 'SQL'],
+      ['层叠样式表', 'CSS'],
+      ['超文本标记语言', 'HTML'],
+      ['云服务平台', 'AWS'],
+      ['容器编排平台', 'Kubernetes'],
+      ['接口设计规范', 'API'],
+      ['软件开发工具包', 'SDK'],
+      ['用户界面设计', 'UI'],
+      ['关键绩效指标', 'KPI'],
+    ]
+    for (const [zh, en] of ATS_PAIRS) {
+      const report = verifyRewrite({
+        original: `- 熟悉${zh}；`,
+        rewritten: `- 熟悉 ${en}；`,
+      })
+      assert.deepEqual(
+        report.findings.filter((f) => f.severity === 'error').map((f) => f.code),
+        [],
+        `短行里把「${zh}」换成「${en}」是 ATS 对齐，不得拒绝导出`,
+      )
+    }
+  })
+
+  test('短行里的凭空新增技能必须拦下（与收缩写法文本相同，靠原文侧区分）', () => {
+    for (const tech of ['Redis', 'Kafka', 'Docker', 'Nginx']) {
+      // 原句与新增行都保留 → 原文句仍在 → 纯增量
+      const report = verifyRewrite({
+        original: '- 熟悉 Java 与 MySQL 的使用；',
+        rewritten: `- 熟悉 Java 与 MySQL 的使用；\n- 熟悉 ${tech}；`,
+      })
+      assert.equal(
+        report.ok,
+        false,
+        `原句仍保留时，另起一行新增 ${tech} 必须是 error`,
+      )
+      // 原文只有一条无关经历 → 更明显的编造
+      const report2 = verifyRewrite({
+        original: '- 使用 Vuex 管理用户登录态与购物车数据；',
+        rewritten: `- 熟悉 ${tech}；\n- 使用 Vuex 管理用户登录态与购物车数据；`,
+      })
+      assert.equal(report2.ok, false, `无法归属的短行技术名必须是 error：${tech}`)
+    }
+  })
+
+  test('收缩判定不得被"拉丁词切碎中文"骗过（保留检查须按整行比对）', () => {
+    // 【实测陷阱】"原句是否被别处保留"若用"最长连续汉字段"判断，
+    // 会被拉丁词骗过：`熟悉 Java 与 MySQL 的使用；` 的连续汉字段只有
+    // `熟悉`(2) 与 `的使用`(3)，于是**原句被逐字保留**时最长共享也只有 3，
+    // 低于阈值 4 → 保留检查失灵 → 短行编造又被放行。
+    // 现按**整行（含拉丁词）**比较（完全相同 / 相似度 ≥ 0.9 / 共享汉字段 ≥ 4）。
+    const report = verifyRewrite({
+      original: '- 熟悉 Java 与 MySQL 的使用；',
+      rewritten: '- 熟悉 Java 与 MySQL 的使用；\n- 熟悉 Redis；',
+    })
+    assert.equal(report.ok, false, '原句逐字保留时，短行新增 Redis 必须拦下')
+  })
+
+  test('容量单位大小写被改动时至少留 warn（bit/byte 相差 8 倍）', () => {
+    for (const [original, rewritten] of [
+      ['- 包体积 2MB；', '- 包体积 2Mb；'],
+      ['- 带宽 2Mb；', '- 带宽 2MB；'],
+      ['- 内存 8Gb；', '- 内存 8GB；'],
+    ]) {
+      const report = verifyRewrite({ original, rewritten })
+      assert.ok(
+        report.findings.some((f) => f.code === 'UNIT_CASE_CHANGED'),
+        `单位大小写变化必须提示：${original} → ${rewritten}`,
+      )
+    }
+  })
+
+  test('单位归一化不得因大小写检查而放宽真实数值改动', () => {
+    for (const [original, rewritten] of [
+      ['- 体积 2MB；', '- 体积 4MB；'],
+      ['- 体积 2MB；', '- 体积 2000KB；'],
+    ]) {
+      const report = verifyRewrite({ original, rewritten })
+      assert.equal(report.ok, false, `数值真的变了必须拦：${original} → ${rewritten}`)
+    }
+  })
+})
+
+describe('守卫：职责升格必须逐条比对（S2-1）', () => {
+  /** 多条经历行，其中同时存在弱动词行与强动词行。 */
+  const RESUME = [
+    '项目经历：',
+    '校园二手交易平台',
+    '- 参与登录模块的重构工作；',
+    '- 负责商品列表页面的开发；',
+    '- 协助完成与后端接口的联调。',
+  ].join('\n')
+
+  test('单条「参与 → 负责」必须抓住，不得被其它行的"参与"稀释', () => {
+    // 缺陷背景：早期按**全文 min/max** 比对。此处文中另有「协助」(2)，
+    // 全文 min 保持 2 不变，于是这条真升格被漏报。
+    const rewritten = RESUME.replace('- 参与登录模块的重构工作；', '- 负责登录模块的重构工作；')
+    const report = verifyRewrite({ original: RESUME, rewritten })
+    assert.equal(report.ok, false, '单条职责升格不得因全文聚合而漏报')
+    const finding = report.findings.find((f) => f.code === 'RESPONSIBILITY_INFLATED')
+    assert.ok(finding)
+    assert.ok(
+      finding.message.includes('登录模块'),
+      '报文必须定位到具体那一条，而不是只给全文统计',
+    )
+  })
+
+  test('单条「参与 → 主导」必须抓住', () => {
+    const rewritten = RESUME.replace('- 参与登录模块的重构工作；', '- 主导登录模块的重构工作；')
+    assert.equal(verifyRewrite({ original: RESUME, rewritten }).ok, false)
+  })
+
+  test('同一单元内删掉弱化动词也算升格（协助完成 → 完成）', () => {
+    // 这不是"压缩表述"，而是**丢掉了弱化限定**：
+    // 「协助完成」的真实强度是"协助"，改成「完成」即把参与程度抬到负责层。
+    // 与"删掉一整行弱动词行"不同——后者是精简，前者是抬高。
+    // 这条锁定该区分，防止后续为"减少误报"而把它一并放宽。
+    const report = verifyRewrite({
+      original: '项目经历：\n- 协助完成与后端接口的联调工作。',
+      rewritten: '项目经历：\n- 完成与后端接口的联调工作。',
+    })
+    assert.equal(report.ok, false, '丢掉"协助"这个弱化限定属于升格，必须抓住')
+  })
+
+  test('合法压缩：删掉一行弱动词经历不得被误报为升格', () => {
+    // 缺陷背景：同一处判据的反方向——删掉弱动词行会抬高**全文** min，
+    // 早期实现据此报升格并拒绝导出，报文还自证矛盾
+    //（"原文最强为负责层，改写后最强为负责层"）。
+    const rewritten = RESUME.replace('- 协助完成与后端接口的联调。\n', '').replace(
+      '- 协助完成与后端接口的联调。',
+      '',
+    )
+    const report = verifyRewrite({ original: RESUME, rewritten })
+    assert.ok(
+      !report.findings.some((f) => f.code === 'RESPONSIBILITY_INFLATED'),
+      '删掉弱表述是精简，不是抬高职责，不得误报',
+    )
+  })
+
+  test('只调整顺序不得被误报为升格', () => {
+    const rewritten = [
+      '项目经历：',
+      '校园二手交易平台',
+      '- 协助完成与后端接口的联调。',
+      '- 负责商品列表页面的开发；',
+      '- 参与登录模块的重构工作；',
+    ].join('\n')
+    const report = verifyRewrite({ original: RESUME, rewritten })
+    assert.ok(
+      !report.findings.some((f) => f.code === 'RESPONSIBILITY_INFLATED'),
+      '重排经历权重是本插件宣称的能力，不得因重排而报升格',
+    )
+  })
+
+  test('凭空新增一条含"主导"的经历：升格与新增必须同时报出', () => {
+    const rewritten = RESUME + '\n- 主导用户增长策略与社群运营体系搭建。'
+    const report = verifyRewrite({ original: RESUME, rewritten })
+    const codes = report.findings.map((f) => f.code)
+    assert.ok(codes.includes('NOVEL_CONTENT'), '整条新增必须报出')
+    assert.ok(
+      codes.includes('RESPONSIBILITY_INFLATED'),
+      '凭空主张领导职责也必须报出（两个检查互为兜底）',
+    )
+  })
+
+  test('配对函数对每条改写都给出原文归属', () => {
+    const pairs = matchUnitsToOriginal(RESUME, RESUME)
+    assert.ok(pairs.length > 0)
+    for (const p of pairs) {
+      assert.equal(typeof p.rewritten, 'string')
+      assert.ok(p.original !== null, '原样文本的每条都应配到原文')
+    }
+  })
+})
+
+describe('守卫：对抗性审查发现的回归（恒等改写 / 误报面 / 配对约束）', () => {
+  // ── 最严重：恒等改写不得报任何 error ────────────────────────────────
+  //
+  // 对抗性审查实测抓出：第一版 `matchUnitsToOriginal` 在"一旦 score ≥ 阈值
+  // 就 break"，取到的是**第一个够格的**而非**最相似的**。两条原文同属一个模块、
+  // 共享大量 bigram 时（同模块的"参与…"与"负责…"），第二条改写会先撞上第一条
+  // （相似度 ~0.58 ≥ 0.25）就停下，被拿去与**错误的那一条**比较，
+  // 从而报出跨行的假升格。
+  //
+  // 后果：`verifyRewrite({original: X, rewritten: X})` → ok=false 并拒绝导出。
+  // **没有改写就不可能升格**，所以这类误报是必然发生的，属最坏一类
+  //（用户连"原样导出"都做不到），本组用例专门锁定它。
+  const IDENTITY_SAMPLES = [
+    ['同模块弱强双条', '项目经历：\n- 参与用户登录模块的重构工作；\n- 负责用户登录模块的性能优化工作；'],
+    ['三条同主题', '项目经历：\n- 参与登录模块重构的相关工作；\n- 负责登录模块性能优化的工作；\n- 协助登录模块接口联调的工作；'],
+    ['实习+项目同主题', '实习经历：\n- 参与订单系统的开发与维护工作；\n- 负责订单系统的性能调优工作；'],
+  ]
+  for (const [name, text] of IDENTITY_SAMPLES) {
+    test(`恒等改写不得误报为升格：${name}`, () => {
+      const report = verifyRewrite({ original: text, rewritten: text })
+      assert.equal(report.ok, true, '没有任何改写就不可能出现职责升格')
+      assert.deepEqual(
+        report.findings.filter((f) => f.severity === 'error'),
+        [],
+        '恒等改写不得产生任何 error（否则用户无法原样导出）',
+      )
+    })
+  }
+
+  test('配对必须取全局最优，而不是第一个够格的（根因锁定）', () => {
+    const original = '- 参与用户登录模块的重构工作；\n- 负责用户登录模块的性能优化工作；'
+    const pairs = matchUnitsToOriginal(original, original)
+    for (const p of pairs) {
+      assert.equal(p.original, p.rewritten, '恒等输入时每条都应精确配到自身')
+      assert.equal(p.score, 1, '自身配对的相似度必须是 1')
+    }
+  })
+
+  test('只扩写一条、动词原样保留 → 不得误报', () => {
+    const original = '- 参与用户登录模块的重构工作；\n- 负责用户登录模块的性能优化工作；'
+    const rewritten =
+      '- 参与用户登录模块的重构工作；\n- 负责用户登录模块的性能优化与监控体系建设工作；'
+    assert.equal(verifyRewrite({ original, rewritten }).ok, true)
+  })
+
+  test('真升格（跨行合并 参与+负责 → 负责）必须被提示', async () => {
+    // 合并条目是常态化写动作。旧实现能报、新实现第一版漏报——
+    // 这条锁定"修复误报时不得把真升格一起放掉"。
+    //
+    // 但注意严重级是 **warn 而非 error**：纯文本无法区分
+    // "合并抬高职责"与"合法删掉了一行弱表述"，判 error 会重新制造
+    // 投递死锁（正是本轮刚修掉的那类缺陷）。故要求"必须提示、不得阻断"。
+    const original = '项目经历：\n- 参与登录模块的重构工作；\n- 负责商品列表的开发工作；'
+    const rewritten = '项目经历：\n- 负责登录模块的重构与商品列表的开发工作；'
+    const report = verifyRewrite({ original, rewritten })
+    const warn = report.findings.find((f) => f.code === 'POSSIBLE_RESPONSIBILITY_INFLATION')
+    assert.ok(warn, '合并掩盖的升格必须被提示出来')
+    assert.equal(warn.severity, 'warn')
+    assert.equal(report.ok, true, 'warn 不得阻断导出（否则合并就会死锁）')
+  })
+
+  test('合法删掉一行弱表述不得被报 error（反向代价锁定）', () => {
+    // 反向配对会把这个场景也看成"层级上升"，若判 error 就是投递死锁。
+    const original = '项目经历：\n- 参与用户登录模块的重构工作；\n- 负责用户登录模块的性能优化工作；'
+    const rewritten = '项目经历：\n- 负责用户登录模块的性能优化工作；'
+    const report = verifyRewrite({ original, rewritten })
+    assert.deepEqual(
+      report.findings.filter((f) => f.severity === 'error').map((f) => f.code),
+      [],
+      '删掉弱表述是合法精简，不得判 error',
+    )
+  })
+
+  // ── S1-2 误报面：等价术语替换不得阻断导出 ───────────────────────────
+  //
+  // 对抗性审查实测：`CI/CD`、`TCP/IP`、`RESTful API`、`unit test`、`code review`
+  // 等中文术语的英文等价写法被判 FABRICATED_ENTITY（error）并**拒绝导出**，
+  // 而这正是 ATS 关键词对齐的核心动作 —— 属投递死锁。
+  const TERM_EQUIVALENTS = [
+    ['持续集成 → CI/CD', '熟悉持续集成与自动化部署流程，负责接口开发工作。', '熟悉 CI/CD 流程与自动化部署，负责接口开发工作。'],
+    ['网络协议 → TCP/IP', '熟悉网络协议与数据传输机制，负责接口开发工作。', '熟悉 TCP/IP 与数据传输机制，负责接口开发工作。'],
+    ['接口工具 → RESTful API', '使用接口调试工具完成联调，负责接口开发工作。', '使用 RESTful API 调试工具完成联调，负责接口开发工作。'],
+    ['软件物料 → SDK', '完成软件物料接入工作，负责接口开发工作。', '完成 SDK 接入工作，负责接口开发工作。'],
+  ]
+  for (const [name, original, rewritten] of TERM_EQUIVALENTS) {
+    test(`等价术语替换不得判 error（否则用户拿不到文件）：${name}`, () => {
+      const report = verifyRewrite({ original, rewritten })
+      assert.deepEqual(
+        report.findings.filter((f) => f.severity === 'error').map((f) => f.code),
+        [],
+        '中文术语 ↔ 英文缩写的等价性无法由代码判定，不得阻断交付',
+      )
+    })
+  }
+
+  test('歧义标识符降级为 warn（不阻断，但也不静默放行）', () => {
+    // 两侧都不能犯：判 error 会死锁，静默放过会留编造盲区。
+    const report = verifyRewrite({
+      original: '熟悉持续集成流程，负责接口开发工作。',
+      rewritten: '熟悉 CI/CD 流程，负责接口开发工作。',
+    })
+    assert.equal(report.ok, true, 'warn 不得让校验失败')
+    const warn = report.findings.find((f) => f.code === 'AMBIGUOUS_NEW_TERM')
+    assert.ok(warn, '必须提示，不能静默放行')
+    assert.equal(warn.severity, 'warn')
+  })
+
+  test('原文已有 D 标记的歧义词不重复提示', () => {
+    const report = verifyRewrite({
+      original: '熟悉 CI/CD 流程，负责接口开发工作。',
+      rewritten: '熟悉 CI/CD 流程，深度参与接口开发工作。',
+    })
+    assert.ok(!report.findings.some((f) => f.code === 'AMBIGUOUS_NEW_TERM'))
+  })
+
+  test('高置信专名仍然是 error（不得因放宽而放掉真编造）', () => {
+    // 反向锁定：放宽歧义词不得把"真的编造技术栈"一起放过
+    const report = verifyRewrite({
+      original: '使用 Vue2 编写主要展示页面和商品列表模块；',
+      rewritten: '使用 Vue2 与 Kubernetes 编写主要展示页面和商品列表模块；',
+    })
+    assert.equal(report.ok, false, '高置信专名编造必须仍判 error')
+    assert.ok(report.findings.some((f) => f.code === 'FABRICATED_ENTITY'))
+  })
+
+  // ── 计量单位换算（S1-1 同族残留，本轮 sweep 实测抓出）────────────────
+  //
+  // `2.4s` 与 `2400ms` 是同一时长的两种写法。早期只归一化中文数量级词
+  // （亿/万/千），未处理计量单位，于是"秒写成毫秒"被判编造并**拒绝导出**——
+  // 与 S1-1 同一类投递死锁，而它同样是模型做可读性对齐时的常规动作。
+  test('计量单位换算必须放行（秒 ↔ 毫秒 / 分钟 ↔ 秒 / MB ↔ KB）', () => {
+    const allow = [
+      ['从 2.4s 缩短至 1.8s', '从 2400ms 缩短至 1800ms'],
+      ['耗时 1.5 分钟', '耗时 90 秒'],
+      ['体积 2MB', '体积 2048KB'],
+      ['耗时 2 小时', '耗时 120 分钟'],
+    ]
+    for (const [original, rewritten] of allow) {
+      const report = verifyRewrite({ original, rewritten })
+      assert.deepEqual(
+        report.findings.filter((f) => f.severity === 'error').map((f) => f.code),
+        [],
+        `单位换算不得误判为编造：${original} -> ${rewritten}`,
+      )
+    }
+  })
+
+  test('单位归一化不得放宽判定：数值真的变了照样抓', () => {
+    const report = verifyRewrite({
+      original: '从 2.4s 缩短至 1.8s',
+      rewritten: '从 3.6s 缩短至 1.8s',
+    })
+    assert.equal(report.ok, false, '单位相同时数值被改必须仍判编造')
+    assert.ok(report.findings.some((f) => f.code === 'FABRICATED_NUMBER'))
+  })
+})
+
+describe('守卫：自证清白判定（S1-3，交付关依赖它）', () => {
+  const ORIGINAL = [
+    '项目经历：',
+    '- 使用 Vue2 编写主要展示页面和商品列表模块；',
+    '- 对接后端 REST 接口，完成登录与购物车功能；',
+  ].join('\n')
+  const WITH_FABRICATION = ORIGINAL.replace(
+    '- 对接后端 REST 接口，完成登录与购物车功能；',
+    '- 对接后端 REST 接口，完成登录与购物车功能，接口响应时间优化 60%；',
+  )
+
+  test('完全相同 → 判为自证清白', () => {
+    assert.equal(detectSelfAttestation(ORIGINAL, ORIGINAL).selfAttested, true)
+  })
+
+  test('仅空白/换行不同 → 仍判为自证清白', () => {
+    assert.equal(detectSelfAttestation(`${ORIGINAL}  `, ORIGINAL).selfAttested, true)
+    assert.equal(detectSelfAttestation(ORIGINAL.replace(/\n/g, '\r\n'), ORIGINAL).selfAttested, true)
+  })
+
+  test('副本 + 一行装饰性文字 → 命中 contains 档（这是 S1-3 的原始绕过）', () => {
+    // 缺陷背景：早期只防"字节相等"，于是加任意一行即可绕过，
+    // 编造内容原样落盘，返回值还宣称 verified=true。
+    // 注意：contains 档**由调用方降级处理而非硬拒绝**——因为纯文本无法区分
+    // "尾部加了装饰"与"删掉了一条经历"，硬拒绝会误伤合法改写（见 export.test.js）。
+    const r = detectSelfAttestation(`${WITH_FABRICATION}\n以上为我的原始简历内容`, WITH_FABRICATION)
+    assert.equal(r.selfAttested, true, '加一行说明不得被当作有效校验基准')
+    assert.equal(r.reason, 'contains')
+  })
+
+  test('副本 + 装饰加在前面 → 同样命中 contains 档', () => {
+    const r = detectSelfAttestation(`说明：以下是我的简历\n${WITH_FABRICATION}`, WITH_FABRICATION)
+    assert.equal(r.selfAttested, true)
+    assert.equal(r.reason, 'contains')
+  })
+
+  test('删掉一条经历（一字未改）→ 也命中 contains 档（故调用方不得硬拒绝）', () => {
+    // 这条用例**证明**该判据无法区分"装饰"与"删除"，因此调用方必须降级而非拒绝。
+    // 它是对"为什么不在这里抛错"的记录，不是期望行为。
+    const original = '- 负责商品列表页面的开发工作\n- 参与登录模块的重构工作'
+    const resume = '- 负责商品列表页面的开发工作'
+    assert.equal(detectSelfAttestation(original, resume).reason, 'contains')
+  })
+
+  test('真实的"改写前原文"（措辞不同）→ 不得判为自证清白', () => {
+    // 反向保障：判据过宽会把正常导出也拦死，制造新的投递死锁（S1-1 同类问题）
+    const r = detectSelfAttestation(
+      '- 使用 Vue2 完成主要展示页面与商品列表模块的开发；\n- 完成后端 REST 接口对接与购物车功能；',
+      ORIGINAL,
+    )
+    assert.equal(r.selfAttested, false, '正常改写不是自证清白')
+  })
+
+  test('模型精简掉整段经历（原文比结果长得多）→ 不得判为自证清白', () => {
+    // 边界：original 逐字包含 resume，但多出的是一整段被删掉的经历，
+    // 属合法压缩，不能拦——否则用户又拿不到文件。
+    const long = `${ORIGINAL}\n- 使用 Vuex 管理用户登录态与购物车数据；\n- 通过懒加载商品图片与请求合并优化首屏性能。`
+    const r = detectSelfAttestation(long, ORIGINAL)
+    assert.equal(r.selfAttested, false, '精简掉成段内容是合法改写，不得判为自证清白')
+  })
+
+  test('过短的结果不做"包含"判定（避免误报）', () => {
+    assert.equal(detectSelfAttestation('很长很长的原文内容在这里', '短文本').selfAttested, false)
+  })
+
+  test('空输入不判为自证清白（由调用方按"未提供原文"处理）', () => {
+    assert.equal(detectSelfAttestation('', ORIGINAL).selfAttested, false)
+    assert.equal(detectSelfAttestation(ORIGINAL, '').selfAttested, false)
   })
 })
