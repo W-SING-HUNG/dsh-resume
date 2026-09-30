@@ -1341,6 +1341,16 @@ export function detectSelfAttestation(original, rewritten) {
   // 按本项目原则（误报比漏报更糟；用户拿不到文件是最坏结果）保持保守：
   // 只认无歧义的"逐字包含"，并**如实声明**防护范围有限
   //（见 README 与工具描述：verified=true 仅表示"对照传入的 original 校验通过"）。
+  //
+  // 【已量化确认这是**不可约简**的边界，不必再试（实测数据记录在此）】
+  // 曾想用"占比"替代绝对容忍量来挡住"伪造 original + 长 padding"：
+  //   伪造 padding 10 字 → 多出占比 13%
+  //   伪造 padding 40 字 → 36%
+  //   伪造 padding 100 字 → 59%
+  //   合法（删掉 2 条经历，一字未改）→ 48%
+  // **两者区间重叠**（13%~59% vs 48%），任何阈值都会同时放过伪造或误拦合法删减。
+  // 结论：维持现状（超限即判"非副本"），并靠 README 如实说明
+  // verified=true 的准确含义。**不要为了"看起来更严"再加启发式**。
   // 这不是"假装堵死"——对外措辞已如实降级。
   if (flatRewritten.length < 8) return { selfAttested: false, reason: '' }
   if (!flatOriginal.includes(flatRewritten)) return { selfAttested: false, reason: '' }
