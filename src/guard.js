@@ -2264,6 +2264,96 @@ export function verifyRewrite({ original, rewritten, claimedKeywords } = {}) {
     })
   }
 
+  /**
+   * 判断 `short` 是否是一个**全大写缩写**、且 `text` 中出现它的英文全称。
+   *
+   * 【用途（英文简历实测抓出的死锁）】
+   * 英文简历里"缩写 ⇄ 全称"是**直接替换**，不像中文用括号注记：
+   *   `Familiar with JVM`  →  `Familiar with Java Virtual Machine`
+   *   `Built REST APIs`    →  `Built Representational State Transfer APIs`
+   * 若不识别，会被判"技术名被替换"→ 拒绝导出。
+   *
+   * 【判据：全大写缩写 + 首字母相符，且**必须**是全大写】
+   * 与 `isInlineAnnotation` 的多词分支同源，同一个理由：
+   *   `Java`（带小写字母、是普通单词）的首字母拼写恰好也是 `JAVA`，
+   *   只看"首字母匹配"会放过 `Java` → `Java Virtual Machine`
+   *   ——那确实**新增了 JVM 这项主张**，应当拦住。
+   * 要求 `short` 为全大写（≥2 个大写字母、无小写）即挡住它。
+   *
+   * 覆盖不到 `K8s ⇄ Kubernetes`（数字式缩写）——已如实写入
+   * {@link GUARD_LIMITATIONS}，不假装支持。
+   *
+   * @param {string} short 被替换掉的词（候选缩写）
+   * @param {string} text 改写后的文本
+   * @returns {boolean} 是否构成"缩写 ↔ 全称"的等价改写
+   */
+  const isAcronymExpansionOf = (short, text) => {
+    const acronym = short.replace(/\./g, '')
+    if (!/^[A-Z][A-Z0-9]*$/.test(acronym) || acronym.length < 2) return false
+    const words = text.match(/[A-Za-z][A-Za-z-]*/g) ?? []
+    for (let i = 0; i + acronym.length <= words.length; i += 1) {
+      const slice = words.slice(i, i + acronym.length)
+      // 词首字母（含词内大写，如 HyperText 贡献 H 与 T）拼起来等于缩写
+      const caps = (slice.join(' ').match(/[A-Z]/g) ?? []).join('')
+      const initials = slice.map((w) => w[0].toUpperCase()).join('')
+      if (caps === acronym || initials === acronym) return true
+    }
+    return false
+  }
+
+  /**
+   * 反向判定：`entity` 是否是原文某个**全大写缩写**的英文全称的一部分。
+   *
+   * 【场景】`JVM`（原文）→ `Java Virtual Machine`（改写）。
+   * 改写后 `Java` 是"新词"，但它其实是原文 `JVM` 的展开，
+   * 没有新增任何技术主张 → 不应判编造。
+   *
+   * @param {string} rewritten 改写全文（用于定位本词所在短语）
+   * @param {string} entity 被判为新词的实体
+   * @param {string} original 原文
+   * @returns {boolean} 是否属于"原文缩写的展开"
+   */
+  const isExpansionOfOriginalAcronym = (rewritten, entity, original) => {
+    // 原文里的全大写缩写（≥2 个大写字母、无小写）
+    /** @type {string[]} */
+    const found = (original.match(/\b[A-Z][A-Z0-9]{1,7}\b/g) ?? []).filter((a) =>
+      /^[A-Z][A-Z0-9]*$/.test(a),
+    )
+    const acronyms = [...new Set(found)]
+    if (acronyms.length === 0) return false
+    /** @type {string[]} */
+    const words = rewritten.match(/[A-Za-z][A-Za-z-]*/g) ?? []
+    const at = words.indexOf(entity)
+    if (at < 0) return false
+    for (const ac of acronyms) {
+      // **窗口按"贡献的大写字母数"切，而不是按词数。**
+      //
+      // 【为什么（实测抓出的误判）】
+      // `HTTP` = HyperText Transfer Protocol —— 4 个字母只跨 **3 个词**
+      //（`HyperText` 贡献 H 与 T）。若按 `ac.length` 个词取窗口，
+      // 会取到 4 个词、越界或错配，于是 `HTTP ⇄ HyperText Transfer Protocol`
+      // 这条合法展开被判"技术名替换"并拒绝导出。
+      // 故从 `at` 起逐步扩大窗口，直到大写字母数 ≥ 缩写长度。
+      for (let end = at; end < words.length; end += 1) {
+        const slice = words.slice(at, end + 1)
+        // ⚠️ **排除"缩写本身就在短语里"的情形（实测抓出的严重漏报）**
+        // 若按"短语的大写字母拼起来等于缩写"判定，下面这种错配会成立：
+        //   原文有 `REST`；改写句 `- 使用 REST ... redis ... mysql ...`
+        //   其大写字母正好是 `REST`（全来自字面量 REST 自己）
+        //   → `redis`／`mysql` 被判为"REST 的展开"而放行。
+        // 实测后果：凭空新增技术名从 error 降为 warn（本该拦住）。
+        if (slice.some((w) => w.toUpperCase() === ac)) continue
+        // 展开短语的词首通常大写（`Java Virtual Machine` ← `JVM`）。
+        if (!slice.every((w) => /^[A-Z]/.test(w))) break
+        const capsInSlice = (slice.join(' ').match(/[A-Z]/g) ?? []).join('')
+        const initials = slice.map((w) => w[0].toUpperCase()).join('')
+        if (capsInSlice === ac || initials === ac) return true
+        if (capsInSlice.length >= ac.length) break
+      }
+    }
+    return false
+  }
+
   if (fabricatedEntities.length > 0) {
     const rewrittenUnits = extractContentUnits(rewrittenText)
     const originalUnits = extractContentUnits(originalText)
@@ -2275,6 +2365,17 @@ export function verifyRewrite({ original, rewritten, claimedKeywords } = {}) {
     const noteList = []
 
     for (const entity of fabricatedEntities) {
+      // ⓪-a 英文"缩写 → 全称"不是新增主张（英文简历实测抓出的死锁）。
+      //
+      // 中文侧这类形态是**括号注记**（`超文本传输协议（HTTP）`），早已放行；
+      // 英文简历没有括号，缩写与全称是**直接替换**：
+      //   `Familiar with JVM` → `Familiar with Java Virtual Machine`
+      // 于是 `Java` 被判"新增技术名"→ 拒绝导出。
+      // 判据：原文里存在全大写缩写，其展开正是本词所在的那段短语。
+      if (isExpansionOfOriginalAcronym(rewrittenText, entity, originalText)) {
+        noteList.push(entity)
+        continue
+      }
       const newUnit = rewrittenUnits.find((u) => appearsIn(entity, u))
       if (newUnit === undefined) {
         // 该技术名只出现在**无法成为内容单元的短行**里（长度 < 8 字，
@@ -2407,7 +2508,19 @@ export function verifyRewrite({ original, rewritten, claimedKeywords } = {}) {
             if (containsHan(e)) {
               return !groupText.toLowerCase().includes(e.toLowerCase())
             }
-            return !appearsIn(e, groupText)
+            if (appearsIn(e, groupText)) return false
+            // 【英文缩写 ↔ 全称：同一技术的两种写法，不算替换（英文简历实测抓出）】
+            //
+            // 中文侧早就能放行这类形态——因为它是**括号注记**
+            //（`超文本传输协议（HTTP）`）。而英文简历里没有括号，
+            // 缩写与全称是**直接替换**，于是走了"技术名替换"→ 拦住：
+            //   `Familiar with JVM` → `Familiar with Java Virtual Machine`
+            //   → 报「技术名被替换：JVM → Java」，**拒绝导出**。
+            //   实测 `REST` ⇄ `Representational State Transfer` 同理。
+            //
+            // 判据沿用本文件已有的"全大写缩写 + 其展开"逻辑：
+            // 若消失的词是**缩写**、且改写单元里出现了它的展开，则为同一技术。
+            return !isAcronymExpansionOf(e, groupText)
           })
         : []
       if (lostHere.length > 0) {

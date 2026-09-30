@@ -1751,6 +1751,53 @@ describe('守卫：结构性判据不得放掉真编造（另一侧锁定）', (
     }
   })
 
+  // ── 英文"缩写 ⇄ 全称"（英文简历里的直接替换，中文侧是括号注记）──────
+  //
+  // 【实测】中文里这类形态是**括号注记**（`超文本传输协议（HTTP）`），早已放行；
+  // 英文简历没有括号，缩写与全称是**直接替换**，于是走了"技术名替换"→ 拦住：
+  //   `Familiar with JVM` → `Familiar with Java Virtual Machine`
+  //   → 报「技术名被替换：JVM → Java」，拒绝导出。
+  test('英文缩写展开为全称必须放行', () => {
+    // 说明：只覆盖"逐词首字母"型缩写（1 字母/词），这也是最常见形态。
+    // `REST` = **R**epresentational State Transfer（E 取自词内）属
+    // "词内取字母"型，与 `Java`（普通单词、首字母拼写恰好=JAVA）在文本上
+    // 无法区分，故**不纳入豁免**——详见 GUARD_LIMITATIONS。
+    // 宁可让 `REST → 全称` 这类少量合法改写被拦，也不放过
+    // `Java → Java Virtual Machine`（那确实新增了 JVM 主张）。
+    for (const [original, rewritten] of [
+      ['- Familiar with JVM', '- Familiar with Java Virtual Machine'],
+      ['- Knows SQL well', '- Knows Structured Query Language well'],
+      ['- Used HTTP protocol', '- Used HyperText Transfer Protocol'],
+    ]) {
+      const report = verifyRewrite({ original, rewritten })
+      assert.deepEqual(
+        report.findings.filter((f) => f.severity === 'error').map((f) => f.code),
+        [],
+        `英文缩写展开不得拒绝导出：${rewritten}`,
+      )
+    }
+  })
+
+  test('但缩写豁免不得被"字面缩写"蹭到（实测抓出的严重漏报）', () => {
+    // 判据若写成"短语的大写字母拼起来等于缩写"，会出现这种错配：
+    //   原文有 `REST`；改写 `- 使用 REST ... redis ... mysql ...`
+    //   取 4 词窗口 `["REST","redis","mysql","s"]`，其大写字母正好是 REST
+    //   → `redis`/`mysql` 被当成"REST 的展开"而放行。
+    // 实测后果：凭空新增技术名从 error 降为 warn。
+    const base = [
+      '技能：',
+      '- 对接后端 REST 接口，完成登录与购物车功能；',
+      '- 使用 Vuex 管理用户登录态与购物车数据；',
+    ].join('\n')
+    const rewritten = base.replace(
+      '- 使用 Vuex 管理用户登录态与购物车数据；',
+      '- 使用 REST 与 redis 管理用户登录态与购物车数据；',
+    )
+    const report = verifyRewrite({ original: base, rewritten })
+    assert.equal(report.ok, false, '凭空新增 redis 必须被拦下（不得被 REST 蹭掉）')
+    assert.ok(report.findings.some((f) => f.code === 'FABRICATED_ENTITY'))
+  })
+
   // ── 英文数量级（K/M/B）——与中文数量级同源，英文侧曾漏做 ────────────────
   //
   // 【实测】`Handled 8K requests` → `Handled 8000 requests` 被判
@@ -2389,8 +2436,7 @@ describe('守卫：自证清白判定（S1-3，交付关依赖它）', () => {
     assert.equal(r.selfAttested, false, '正常改写不是自证清白')
   })
 
-  test('英文简历的自证清白判定必须与中文一致（容忍量需按语言缩放）', () => {
-    // 【实测抓出的不对称】同一句装饰扁平化后长度差很大
+  test('英文简历的自证清白判定必须与中文一致（容忍量需按语言缩放）', () => {    // 【实测抓出的不对称】同一句装饰扁平化后长度差很大
     //（中文 12 字 vs 英文 26 字符），而容忍量下限是固定的 20，
     // 于是**中文命中 contains、英文漏掉**：
     //   `original = resume + 一行装饰` 这个 S1-3 原始绕过，
