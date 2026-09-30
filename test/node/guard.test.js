@@ -2035,6 +2035,48 @@ describe('守卫：结构性判据不得放掉真编造（另一侧锁定）', (
   //
   // 取 warn 而非 error：`KB/kb`、`MB/mb` 混写在简历里很常见、多半同义，
   // 判 error 会误报死锁；但 bit/byte 确实语义不同，必须提示。
+  test('文档声明（GUARD_LIMITATIONS）必须与实现一致', () => {
+    // 【为什么需要这条（本轮踩到两次）】
+    // 我两次在 GUARD_LIMITATIONS 里写下"某形态会被拦/会被放行"，
+    // 但实现已在同一轮改动中变了，声明却没跟上——**对外文档说了假话**。
+    // 这条用例把声明里引用的**具体例子**逐一拿去跑，与声明核对。
+    // 将来改判定而忘了改文档时，它会失败。
+    const CLAIMS = [
+      // [声明里的例子, 原句, 改写, 期望可导出]
+      ['CSS → 层叠样式表 只报建议检查', '- 熟悉 CSS；', '- 熟悉层叠样式表；', true],
+      ['删掉技术名只报建议检查', '- 熟悉 CSS 与 HTML；', '- 熟悉 HTML；', true],
+      ['2MB ↔ 2Mb 只提示', '- 体积 2MB；', '- 体积 2Mb；', true],
+      ['超文本传输协议（HTTP）放行', '- 熟悉超文本传输协议的使用；', '- 熟悉超文本传输协议（HTTP）的使用；', true],
+      ['超文本传输协议（HyperText…）放行', '- 熟悉超文本传输协议的使用；', '- 熟悉超文本传输协议（HyperText Transfer Protocol）的使用；', true],
+      ['专业技能（Skills）放行', '# 张伟\n## 专业技能\n- 熟悉 Java；', '# 张伟\n## 专业技能（Skills）\n- 熟悉 Java；', true],
+      ['JVM（Java Virtual Machine）放行', '- 精通 JVM 调优；', '- 精通 JVM（Java Virtual Machine）调优；', true],
+      ['数据库（Redis Cluster）拦住', '- 熟悉数据库的使用；', '- 熟悉数据库（Redis Cluster）的使用；', false],
+      ['Java（Just Another …）拦住', '- 熟悉 Java；', '- 熟悉 Java（Just Another Vague Abbreviation）；', false],
+      ['项目经历（用户增长系统）拦住', '# 张伟\n## 项目经历\n- 熟悉 Java；', '# 张伟\n## 项目经历（用户增长系统）\n- 熟悉 Java；', false],
+      ['熟悉超文本传输协议 → 熟悉 HTTP 放行', '- 熟悉超文本传输协议；', '- 熟悉 HTTP；', true],
+      ['JVM ⇄ Java Virtual Machine 放行', '- Familiar with JVM', '- Familiar with Java Virtual Machine', true],
+      ['SQL ⇄ Structured Query Language 放行', '- Knows SQL well', '- Knows Structured Query Language well', true],
+      ['HTTP ⇄ HyperText Transfer Protocol 放行', '- Used HTTP', '- Used HyperText Transfer Protocol', true],
+      ['K8s ⇄ Kubernetes 放行', '- Deployed on K8s', '- Deployed on Kubernetes', true],
+      ['i18n ⇄ internationalization 放行', '- Added i18n support', '- Added internationalization support', true],
+      ['REST ⇄ 全称 拦住（声明的已知边界）', '- Built REST APIs', '- Built Representational State Transfer APIs', false],
+      ['★K8s → Kafka 拦住', '- Deployed on K8s', '- Deployed on Kafka', false],
+      ['JavaScript → Java 拦住', '- Used JavaScript', '- Used Java', false],
+      ['PostgreSQL → Postgres 拦住', '- Used PostgreSQL', '- Used Postgres', false],
+    ]
+    for (const [claim, original, rewritten, wantExport] of CLAIMS) {
+      const report = verifyRewrite({ original, rewritten })
+      const got = !report.findings.some((f) => f.severity === 'error')
+      assert.equal(
+        got,
+        wantExport,
+        `GUARD_LIMITATIONS 声明「${claim}」与实现不一致：` +
+          `实际 ${got ? '放行' : '拦住'}，声明为 ${wantExport ? '放行' : '拦住'}。` +
+          '改了判定就同步改文档。',
+      )
+    }
+  })
+
   test('短行里的技术名替换也不得静默（< 8 字单元不在逐条比对范围）', () => {
     // 【为什么专门测（本轮自查抓出的残留静默）】
     // "技术名消失"的逐条比对只走**内容单元**（长度 ≥ 8 字），
