@@ -1693,6 +1693,64 @@ describe('守卫：结构性判据不得放掉真编造（另一侧锁定）', (
     }
   })
 
+  // ── 英文简历（插件支持 language: 'en'，此前测试全是中文）────────────────
+  //
+  // 【实测抓出的两处真问题】
+  // ① 职责词表原本只有中文 → 英文简历上这道检查**完全空转**：
+  //      `Participated in database optimization`（辅助层）
+  //      → `Led database optimization`（主导层）
+  //    零告警 —— "参与写成主导"这类最典型的事实夸大被一放到底。
+  // ② 英文月份缩写被判为新增技术名：
+  //      `2022.09 - 2026.06` → `Sep 2022 - Jun 2026` 是日期格式统一，
+  //      但 `Sep`/`Jun` 被判 FABRICATED_ENTITY → 拒绝导出。
+  test('英文职责升格必须被抓住（词表原本只有中文，此检查在英文简历上曾空转）', () => {
+    for (const [original, rewritten] of [
+      [
+        '- Participated in database optimization, improving query performance',
+        '- Led database optimization, improving query performance',
+      ],
+      ['- Assisted with API development', '- Owned API development'],
+      ['- Contributed to the payment module', '- Spearheaded the payment module'],
+      ['- Helped build the admin panel', '- Architected the admin panel'],
+    ]) {
+      const report = verifyRewrite({ original, rewritten })
+      assert.equal(report.ok, false, `英文职责升格必须拦下：${rewritten}`)
+      assert.ok(
+        report.findings.some((f) => f.code === 'RESPONSIBILITY_INFLATED'),
+        '必须报出 RESPONSIBILITY_INFLATED',
+      )
+    }
+  })
+
+  test('英文职责等强度改写不得误报', () => {
+    for (const [original, rewritten] of [
+      ['- Participated in database optimization', '- Participated in the optimization of the database'],
+      ['- Developed 12 REST APIs', '- Built 12 REST APIs'],
+      ['- Familiar with React', '- Familiar with the React framework'],
+    ]) {
+      const report = verifyRewrite({ original, rewritten })
+      assert.deepEqual(
+        report.findings.filter((f) => f.severity === 'error').map((f) => f.code),
+        [],
+        `等强度英文改写不得拒绝导出：${rewritten}`,
+      )
+    }
+  })
+
+  test('英文月份缩写（日期格式统一）不得被判为新增技术名', () => {
+    for (const [original, rewritten] of [
+      ['Computer Science, 2022.09 - 2026.06', 'Computer Science, Sep 2022 - Jun 2026'],
+      ['2021.01 - 2021.12', 'Jan 2021 - Dec 2021'],
+    ]) {
+      const report = verifyRewrite({ original, rewritten })
+      assert.deepEqual(
+        report.findings.filter((f) => f.severity === 'error').map((f) => f.code),
+        [],
+        `日期格式统一不得拒绝导出：${rewritten}`,
+      )
+    }
+  })
+
   test('正文里的说明性文字降为 warn（不含事实主张，不阻断交付）', () => {
     // 落款、章节导语这类新增文字不含数字/机构/技术名/职责主张，
     // 判 error 只会让用户拿不到文件。降为 warn：提示但不阻断。

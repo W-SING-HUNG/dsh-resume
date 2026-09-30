@@ -282,6 +282,17 @@
 
 ### Changed
 
+- **英文简历（`language: 'en'`）：修复一处真实漏报与一处误报**：
+
+  此前所有实测都在中文简历上，本轮补测英文简历，抓到两个真问题：
+
+  | 问题 | 现象 | 根因与修法 |
+  |---|---|---|
+  | **职责升格检查在英文简历上完全空转**（漏报，最严重） | `Participated in database optimization` → `Led database optimization`（辅助层 → 主导层）实测 `ok=true`、**零告警**——"参与写成主导"这类最典型的事实夸大被一放到底 | `RESPONSIBILITY_LEVELS` 的动词表**只有中文**。现为每一层补 `enWords`（participated/assisted/contributed → completed/implemented/built → led/spearheaded/architected → decided/strategized），并用**词边界**匹配（`\b`），避免 `led` 命中 `enabled` |
+  | **英文月份缩写被判为新增技术名** | `2022.09 - 2026.06` → `Sep 2022 - Jun 2026`（日期格式统一）被判 `FABRICATED_ENTITY` 并**拒绝导出** | `Sep`/`Jun` 未在普通英文词表里。已补 12 个月份全称与缩写 |
+
+  实测英文简历：12/12 合法改写放行、3/3 编造拦住。
+
 - **真实简历误报率实测：从 40% 收敛到 0%（合法编辑动作集）**：
 
   做法是准备多份真实形态的中文简历，跑模型做 ATS 对齐/排版规范时最常做的

@@ -501,6 +501,34 @@ const EN_STOPWORDS = new Set(
     'marketing',
     'business',
     'administration',
+    // 【英文月份缩写（英文简历实测抓出的误报）】
+    // `2022.09 - 2026.06` → `Sep 2022 - Jun 2026` 是**日期格式统一**，
+    // 但 `Sep`/`Jun` 被判为"新增技术名"→ FABRICATED_ENTITY → **拒绝导出**。
+    // 英文简历里月份缩写极常见，且不可能构成技术栈主张。
+    'jan',
+    'feb',
+    'mar',
+    'apr',
+    'may',
+    'jun',
+    'jul',
+    'aug',
+    'sep',
+    'sept',
+    'oct',
+    'nov',
+    'dec',
+    'january',
+    'february',
+    'march',
+    'april',
+    'june',
+    'july',
+    'august',
+    'september',
+    'october',
+    'november',
+    'december',
   ].map((w) => w.toLowerCase()),
 )
 
@@ -1295,11 +1323,77 @@ const FULLWIDTH_DIGITS = '０１２３４５６７８９'
  * 分级依据：对工作成果的**所有权强度**，而非修辞强弱。
  */
 const RESPONSIBILITY_LEVELS = [
-  { level: 1, label: '认知层', words: ['了解', '熟悉', '接触', '学习', '入门'] },
-  { level: 2, label: '辅助层', words: ['参与', '协助', '配合', '支持', '跟随'] },
-  { level: 3, label: '负责层', words: ['负责', '承担', '完成', '执行', '独立开发'] },
-  { level: 4, label: '主导层', words: ['主导', '牵头', '独立完成', '主持', '主责'] },
-  { level: 5, label: '决策层', words: ['统筹', '决策', '拍板', '制定战略', '定方向'] },
+  {
+    level: 1,
+    label: '认知层',
+    words: ['了解', '熟悉', '接触', '学习', '入门'],
+    // 英文对应（插件支持 language: 'en'，见 SUPPORTED_LANGUAGES）
+    enWords: ['learned', 'learning', 'familiar', 'exposed', 'introduced', 'aware'],
+  },
+  {
+    level: 2,
+    label: '辅助层',
+    words: ['参与', '协助', '配合', '支持', '跟随'],
+    enWords: [
+      'participated',
+      'participate',
+      'assisted',
+      'assist',
+      'supported',
+      'support',
+      'contributed',
+      'contribute',
+      'helped',
+      'help',
+      'involved',
+      'collaborated',
+    ],
+  },
+  {
+    level: 3,
+    label: '负责层',
+    words: ['负责', '承担', '完成', '执行', '独立开发'],
+    enWords: [
+      'responsible',
+      'completed',
+      'complete',
+      'executed',
+      'implemented',
+      'developed',
+      'built',
+      'delivered',
+      'owned',
+      'managed',
+    ],
+  },
+  {
+    level: 4,
+    label: '主导层',
+    words: ['主导', '牵头', '独立完成', '主持', '主责'],
+    enWords: [
+      'led',
+      'leading',
+      'spearheaded',
+      'drove',
+      'initiated',
+      'directed',
+      'architected',
+      'established',
+    ],
+  },
+  {
+    level: 5,
+    label: '决策层',
+    words: ['统筹', '决策', '拍板', '制定战略', '定方向'],
+    enWords: [
+      'decided',
+      'strategized',
+      'defined',
+      'set direction',
+      'prioritized',
+      'orchestrated',
+    ],
+  },
 ]
 
 /**
@@ -1325,9 +1419,25 @@ export function extractResponsibilityLevel(text) {
   /** @type {Array<{ level: number, label: string, word: string }>} */
   const hits = []
   if (src === '') return { minLevel: 0, maxLevel: 0, hits }
+  const lower = src.toLowerCase()
   for (const tier of RESPONSIBILITY_LEVELS) {
     for (const word of tier.words) {
       if (src.includes(word)) {
+        hits.push({ level: tier.level, label: tier.label, word })
+      }
+    }
+    // 英文职责动词（插件支持 language: 'en'）。
+    //
+    // 【为什么必须补（英文简历实测抓出的真实漏报）】
+    // 职责词表原本只有中文，于是英文简历上这道检查**完全空转**：
+    //   `Participated in database optimization`（辅助层）
+    //   → `Led database optimization`（主导层）
+    //   实测 ok=true、零告警——"参与"写成"主导"这类最典型的事实夸大一放到底。
+    // 用**词边界**匹配（`\b`），避免 `led` 命中 `enabled`、
+    // `owned` 命中 `downed` 之类的子串误报。
+    for (const word of tier.enWords ?? []) {
+      const escaped = word.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+      if (new RegExp(`(?<![a-z])${escaped}(?![a-z])`, 'i').test(lower)) {
         hits.push({ level: tier.level, label: tier.label, word })
       }
     }
