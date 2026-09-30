@@ -257,11 +257,39 @@ export function buildVerifyValue({ original, rewritten, claimedKeywords } = {}) 
 
   let summary
   if (errorCount > 0) {
+    // 【为什么也必须按实际 finding 生成（本轮自查发现的真实 bug）】
+    // 这里原先写死一句"删除编造数字/机构、把职责动词改回原强度、恢复被改动的日期"。
+    // 但 error 级**共有 6 种**，其中两种与这句话毫无关系：
+    //   · `NOVEL_CONTENT`（整条新增）→ 该做的是**删掉多出来的那条**，
+    //     而不是去改数字或日期；
+    //   · `UNVERIFIED_KEYWORD_CLAIM`（关键词虚报）→ 该做的是
+    //     **把词写进经历或移入待补充清单**，改数字完全解决不了问题。
+    // 模型会**照错方向修正**：改完数字再校验，同一处 error 依旧，
+    // 白跑一轮（而 `verify_rewrite` 的修正闭环正是靠这段 summary 驱动的）。
+    //
+    // 这与 v1.3.0 修的是**同一个 bug**——当时只改了 warn 侧，error 侧漏了。
+    // 教训：凡"按 finding 种类输出文案"处，必须**逐 code 覆盖**，
+    // 且新增 code 时要同步补；写死的兜底文案必然与实现脱节。
+    const errorActions = /** @type {Record<string, string>} */ ({
+      FABRICATED_NUMBER: '删除改写的编造数字，恢复原文的真实数值',
+      FABRICATED_ENTITY: '删除原文没有的技术名/机构名，或改回原文写法',
+      RESPONSIBILITY_INFLATED: '把升格的职责动词改回原强度（如「主导」改回「参与」）',
+      FABRICATED_DATE: '把被改动的日期恢复为原文的时间',
+      NOVEL_CONTENT: '删除凭空新增的整条内容（原文中找不到出处的经历/职责）',
+      UNVERIFIED_KEYWORD_CLAIM:
+        '把你声称覆盖的关键词真正写进对应经历，或从声称列表中移除并移入「待补充清单」',
+    })
+    const errorFindings = report.findings.filter((f) => f.severity === 'error')
+    const actions = [
+      ...new Set(
+        errorFindings.map((f) => errorActions[f.code] ?? `修正该项：${f.code}`),
+      ),
+    ]
     summary =
       `校验未通过：发现 ${errorCount} 处疑似编造或夸大内容。` +
-      '你必须修正这些问题后重新提交 —— 删除改写的编造数字/机构，' +
-      '把升格的职责动词改回原强度，恢复被改动的日期。' +
-      '修正后请再次调用本工具确认通过。'
+      '你必须按下列方式修正后重新提交：\n' +
+      actions.map((a) => `- ${a}`).join('\n') +
+      '\n修正后请再次调用本工具确认通过。绝不允许"保留但说明"。'
   } else if (warnCount > 0) {
     // 【为什么必须按实际 finding 生成，不能写死一句文案（独立审查发现的真实 bug）】
     // 早期这里写的是"原文的部分真实数据在改写后消失"，但那只是**其中一种** warn。

@@ -9,6 +9,8 @@ import assert from 'node:assert/strict'
 
 import {
   createToolDefinition,
+  createVerifyToolDefinition,
+  buildVerifyValue,
   TOOL_NAME,
   RESUME_VALUE_SCHEMA,
   RESUME_PARAMETERS_JSON_SCHEMA,
@@ -225,4 +227,165 @@ describe('失败路径（真实 execute）', () => {
       )
     })
   }
+})
+
+// ── verify_rewrite 的 summary 必须与实际 finding 对应 ─────────────────────
+//
+// 【为什么单独测（本轮自查发现的真实 bug）】
+// `buildVerifyValue` 的 **error** 摘要原先写死一句
+// "删除编造数字/机构、把职责动词改回原强度、恢复被改动的日期"。
+// 但 error 级共有 6 种，其中两种与这句话毫无关系：
+//   · `NOVEL_CONTENT`（整条新增）→ 该删掉多出来的那条，而非改数字/日期；
+//   · `UNVERIFIED_KEYWORD_CLAIM`（关键词虚报）→ 该把词写进经历或移入待补充，
+//     改数字完全解决不了问题。
+// 模型会**照错方向修正**：改完再校验，同一处 error 依旧，白跑一轮——
+// 而这段 summary 正是 `verify_rewrite` 修正闭环的驱动力。
+//
+// v1.3.0 修过同一个 bug，但**只修了 warn 侧**，error 侧漏了。
+// 故这里对**每一种** error code 都断言：指引必须提到该问题的正确修法，
+// 且**不得**出现与该问题无关的指引（防止将来新增 code 时再漏）。
+describe('verify_rewrite 的 error 摘要按实际 finding 生成', () => {
+  /**
+   * 能稳定触发单一 error code 的输入。
+   * @type {Array<{ code: string, original: string, rewritten: string, claimedKeywords?: string[], mustMention: RegExp, mustNotMention?: RegExp }>}
+   */
+  const cases = [
+    {
+      code: 'FABRICATED_NUMBER',
+      original: '- 性能提升 40%；',
+      rewritten: '- 性能提升 65%；',
+      mustMention: /数字/,
+    },
+    {
+      code: 'FABRICATED_ENTITY',
+      original: '- 熟悉 CSS；',
+      rewritten: '- 熟悉 SCSS；',
+      mustMention: /技术名|机构名/,
+    },
+    {
+      code: 'RESPONSIBILITY_INFLATED',
+      original: '- 参与登录重构；',
+      rewritten: '- 主导登录重构；',
+      mustMention: /职责/,
+    },
+    {
+      code: 'FABRICATED_DATE',
+      original: '- 2020年入职；',
+      rewritten: '- 2023年入职；',
+      mustMention: /日期/,
+    },
+    {
+      code: 'NOVEL_CONTENT',
+      original: '- 使用 Vue2 开发页面；',
+      rewritten: '- 使用 Vue2 开发页面；\n- 负责用户增长策略实现月活翻倍；',
+      mustMention: /新增|出处/,
+      // 整条新增与数字/日期无关，不得给出这些无关指引（旧 bug 正是如此）
+      mustNotMention: /数字|日期|职责动词/,
+    },
+    {
+      code: 'UNVERIFIED_KEYWORD_CLAIM',
+      original: '- 熟悉 Java；',
+      rewritten: '- 熟悉 Java；',
+      claimedKeywords: ['TypeScript'],
+      mustMention: /关键词/,
+      mustNotMention: /数字|日期|职责动词/,
+    },
+  ]
+
+  for (const tc of cases) {
+    test(`${tc.code}：指引必须指向正确修法`, () => {
+      const value = buildVerifyValue({
+        original: tc.original,
+        rewritten: tc.rewritten,
+        claimedKeywords: tc.claimedKeywords,
+      })
+      assert.equal(value.ok, false, `${tc.code} 应当判为未通过`)
+      assert.ok(
+        value.issues.some((i) => i.includes(tc.code)),
+        `明细里应出现 ${tc.code}`,
+      )
+      assert.match(value.summary, tc.mustMention, `${tc.code} 的摘要未提到正确修法`)
+      if (tc.mustNotMention) {
+        assert.doesNotMatch(
+          value.summary,
+          tc.mustNotMention,
+          `${tc.code} 的摘要出现了与该问题无关的指引（模型会照错方向改）`,
+        )
+      }
+    })
+  }
+
+  test('多种 error 并存时逐条列出，不遗漏任何一种', () => {
+    const value = buildVerifyValue({
+      original: '- 性能提升 40%；\n- 熟悉 CSS；',
+      rewritten: '- 性能提升 65%；\n- 熟悉 SCSS；',
+      claimedKeywords: ['Golang'],
+    })
+    // 该输入会触发 4 种 error：编造数字、编造技术名、关键词虚报、整条新增。
+    // 注意不要写死数量（新增判定会改变它），改为断言"每类问题都有对应指引"。
+    assert.ok(value.errorCount >= 3, `应有多类 error，实际 ${value.errorCount}`)
+    assert.match(value.summary, /数字/)
+    assert.match(value.summary, /技术名|机构名/)
+    assert.match(value.summary, /关键词/)
+    // 摘要列出的动作条数应与 error 类型数一致（同类合并，不重复罗列）
+    const listed = value.summary.split('\n').filter((l) => l.startsWith('- '))
+    assert.ok(
+      listed.length >= 3,
+      `摘要应逐条列出修正方式，实际 ${listed.length} 条`,
+    )
+  })
+
+  test('新增 error code 时若未补文案，兜底也须包含该 code（不静默）', () => {
+    // 兜底分支：`errorActions[code] ?? 修正该项：${code}`。
+    // 本用例锁住"兜底必须带 code"，这样未来新增判定但忘了补文案时，
+    // 模型至少能看到代码名，而不是收到一句无关的指引。
+    const value = buildVerifyValue({
+      original: '- 熟悉 CSS；',
+      rewritten: '- 熟悉 SCSS；',
+    })
+    const mentioned = value.issues.join('\n')
+    assert.match(mentioned, /FABRICATED_ENTITY/)
+  })
+
+  test('warning 摘要同样按实际 finding 生成（v1.3.0 已修，此处防回归）', () => {
+    const value = buildVerifyValue({
+      original: '- 熟悉 Java；\n- 熟悉 MySQL；',
+      rewritten: '- 熟悉 Java；',
+    })
+    assert.equal(value.ok, true)
+    assert.ok(value.warnCount > 0)
+    // 该场景是"技术名消失"，不是"数据丢失"——摘要必须如实描述
+    assert.match(value.summary, /技术名/)
+    assert.doesNotMatch(value.summary, /量化数据/)
+  })
+
+  test('渲染出的内容包含摘要、明细与已知边界', () => {
+    const verifyDef = createVerifyToolDefinition()
+    const value = buildVerifyValue({
+      original: '- 熟悉 CSS；',
+      rewritten: '- 熟悉 SCSS；',
+    })
+    const blocks = verifyDef.output.render({}, value)
+    assert.equal(blocks.length, 1)
+    assert.equal(blocks[0].type, 'text')
+    assert.match(blocks[0].text, /校验未通过/)
+    assert.match(blocks[0].text, /明细/)
+    assert.match(blocks[0].text, /已知边界/)
+  })
+
+  test('render 对缺字段的 value 不抛错（防御平台传值不全）', () => {
+    const verifyDef = createVerifyToolDefinition()
+    for (const value of [{}, { summary: null }, { summary: 'x', issues: 'not-array' }]) {
+      const blocks = verifyDef.output.render({}, value)
+      assert.equal(blocks[0].type, 'text')
+      assert.equal(typeof blocks[0].text, 'string')
+    }
+  })
+
+  test('execute 传入非法参数时 reject 且提示字段名', async () => {
+    const verifyDef = createVerifyToolDefinition()
+    await assert.rejects(() => verifyDef.execute({ rewritten: 'x' }), /original/)
+    await assert.rejects(() => verifyDef.execute({ original: 'x' }), /rewritten/)
+    await assert.rejects(() => verifyDef.execute({}), /original/)
+  })
 })

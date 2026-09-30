@@ -13,7 +13,7 @@ import assert from 'node:assert/strict'
 import { mkdtempSync, writeFileSync, readFileSync, existsSync, rmSync } from 'node:fs'
 import { inflateRawSync } from 'node:zlib'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { join, isAbsolute } from 'node:path'
 
 import {
   buildZip,
@@ -710,6 +710,83 @@ describe('导出：安全边界（防止毁坏用户文件）', () => {
       'junction 不得被用来绕过导出目录限制',
     )
     assert.equal(existsSync(join(outside, 'f.md')), false, '根外不得落盘')
+  })
+
+  // ── 路径安全判定的其余分支（覆盖率显示的未测分支，逐个补上）────────────
+  //
+  // 【为什么补这几条】这些分支是安全边界，却一直没被直接断言：
+  // 声明了却未测的边界**会在重构中静默失效**——判定被改坏也不会有测试失败。
+  // 而它们恰恰是 S2-2（junction 穿越）修复时新增的代码。
+
+  test('边界：父路径存在但不是目录时明确报错', async (t) => {
+    const dir = tempDir(t)
+    const { writeFileSync } = await import('node:fs')
+    // 父路径是一个**文件**（不是目录）→ 必须报"父路径不是目录"，而非 ENOENT
+    const notADir = join(dir, 'a-file')
+    writeFileSync(notADir, 'x')
+    await assert.rejects(
+      () => writeResumeFile(join(notADir, 'out.md'), Buffer.from('x')),
+      // Windows 上该情形可能先抛 ENOTDIR；接受任一明确的拒绝即可
+      /父路径不是目录|目标目录不存在|ENOTDIR|not a directory/i,
+      '父路径不是目录时必须明确拒绝',
+    )
+  })
+
+  test('边界：目标目录不存在时不创建任何目录树', async (t) => {
+    const dir = tempDir(t)
+    const deep = join(dir, 'a', 'b', 'c', 'out.md')
+    await assert.rejects(
+      () => writeResumeFile(deep, Buffer.from('x')),
+      /目标目录不存在/,
+    )
+    // 逐层确认都没被创建（"不自动创建"是承诺的行为）
+    assert.equal(existsSync(join(dir, 'a')), false, '不得创建任何中间目录')
+  })
+
+  test('边界：导出根约束下，指向根外父目录的写入被拒', async (t) => {
+    const dir = tempDir(t)
+    const root = join(dir, 'root')
+    const { mkdirSync } = await import('node:fs')
+    mkdirSync(root)
+    const prev = process.env.DSH_RESUME_EXPORT_ROOT
+    process.env.DSH_RESUME_EXPORT_ROOT = root
+    t.after(() => {
+      if (prev === undefined) delete process.env.DSH_RESUME_EXPORT_ROOT
+      else process.env.DSH_RESUME_EXPORT_ROOT = prev
+    })
+    // 目标在根外，且其父目录也不存在 → 无论走哪条拒绝路径都不得落盘
+    const outside = join(dir, 'outside', 'deep', 'out.md')
+    await assert.rejects(
+      () => writeResumeFile(outside, Buffer.from('x')),
+      /不在允许的导出目录内|目标目录不存在/,
+    )
+    assert.equal(existsSync(join(dir, 'outside')), false, '根外不得落盘')
+  })
+
+  test('边界：根目录本身尚不存在时也能给出明确结论（不崩溃）', async (t) => {
+    const dir = tempDir(t)
+    const missingRoot = join(dir, 'not-created-yet')
+    const prev = process.env.DSH_RESUME_EXPORT_ROOT
+    process.env.DSH_RESUME_EXPORT_ROOT = missingRoot
+    t.after(() => {
+      if (prev === undefined) delete process.env.DSH_RESUME_EXPORT_ROOT
+      else process.env.DSH_RESUME_EXPORT_ROOT = prev
+    })
+    // 根不存在时 realpath 会失败，代码须回退用原值判定，而不是抛未捕获异常
+    await assert.rejects(
+      () => writeResumeFile(join(dir, 'x.md'), Buffer.from('x')),
+      /不在允许的导出目录内/,
+      '根不存在时应明确拒绝越界写入，而非崩溃',
+    )
+  })
+
+  test('边界：成功写入时返回实际落盘的绝对路径（供回执使用）', async (t) => {
+    const dir = tempDir(t)
+    const target = join(dir, 'ok.md')
+    const returned = await writeResumeFile(target, Buffer.from('hello'))
+    assert.ok(isAbsolute(returned), '返回值必须是绝对路径')
+    assert.equal(returned, target)
+    assert.equal(existsSync(target), true, '文件必须真的落盘')
   })
 })
 

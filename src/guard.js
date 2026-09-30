@@ -129,8 +129,9 @@ const ZH_VERB_PREFIXES = [
  *      「英文名 + 中文后缀」的写法中间有空格，按空格切会整个漏掉。
  *   3. 片内会残留动词前缀，需用 {@link ZH_VERB_PREFIXES} 黑名单过滤，
  *      否则 `主导公司` 这类会被误报为机构名。
- *   4. 只认后缀会漏掉无后缀机构（`字节跳动`、`腾讯`），
- *      故额外做一次"无后缀专名"提取（见 {@link extractShortOrgNames}）。
+ *   4. 只认后缀会漏掉无后缀机构（`字节跳动`、`腾讯`）。
+ *      **本项目不做无后缀专名提取**——实测会产生海量误报（见下方说明），
+ *      该局限已写入 {@link GUARD_LIMITATIONS}，由用户人工确认。
  *
  * @param {string} text 待提取文本
  * @returns {Set<string>} 机构名候选集合
@@ -199,13 +200,7 @@ export function extractChineseOrgNames(text) {
  *   - 带强后缀的机构名（某某公司/大学/银行…）→ 判定为 error
  *   - 无后缀的机构名 → 不检测，改为在报告里提示"请人工确认无新增机构"
  * 这个取舍是明确记录的已知局限，不是遗漏。
- *
- * @param {string} _text 待提取文本（未使用）
- * @returns {Set<string>} 恒为空集合
  */
-export function extractShortOrgNames(_text) {
-  return new Set()
-}
 
 /**
  * 常见泛词/非机构中文词。保留供后续若有更可靠的分词方案时使用。
@@ -1617,16 +1612,6 @@ export function verifyRewrite({ original, rewritten, claimedKeywords } = {}) {
     return m === null ? -1 : m.index
   }
   /**
-   * 取某实体在句子中**紧邻其前**的一小段文本，用于判断它是被"连接词并进列表"的。
-   * @param {string} unit 句子
-   * @param {string} entity 实体
-   * @returns {string} 前文片段
-   */
-  const beforeEntity = (unit, entity) => {
-    const at = indexOfToken(unit, entity)
-    return at < 0 ? '' : unit.slice(Math.max(0, at - 6), at)
-  }
-  /**
    * 判断实体是否处于"中文术语旁的并列注记位"（`（HTTP）`、`/ CI`）。
    *
    * 这类形态是把中文说法与英文写法并列——ATS 关键词对齐的常规动作。
@@ -1983,10 +1968,6 @@ export function verifyRewrite({ original, rewritten, claimedKeywords } = {}) {
         out.push(`${m[1]}${m[2]}`)
       }
       return out
-    }
-    const toCaseSignature = (/** @type {string} */ pair) => {
-      const m = /^([\d,.]+)(.*)$/.exec(pair)
-      return m === null ? '' : `${m[1]}|${m[2].toLowerCase()}|${m[2]}`
     }
     const origPairs = numberUnitPairs(originalText)
     const newPairs = numberUnitPairs(rewrittenText)
