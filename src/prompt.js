@@ -2,7 +2,7 @@
 //
 // 设计原则：只基于事实重排和强化，绝不虚构经历（虚构 = 求职者面试翻车 = 差评）
 //
-// ┌─ PROMPT 版本：1.2.0 ────────────────────────────────────────────────────┐
+// ┌─ PROMPT 版本：1.3.0 ────────────────────────────────────────────────────┐
 // │ 改动本文件时必须同步更新此版本号，并在 CHANGELOG.md 说明理由。          │
 // │ 三项铁律（只用真实信息 / 保留量化数据 / 缺项进待补充清单）不可削弱，    │
 // │ 已由测试与 CI 的 guard 任务物理锁定。                                   │
@@ -15,10 +15,16 @@
 // │ 原因：校验此前只在 verify_rewrite，模型若跳过它直接导出，               │
 // │ 用户仍会拿到未校验的编造简历——铁律又回到"靠自觉"。                      │
 // │ 现在 export_resume 也会跑一次确定性校验，不通过则拒绝写出文件。         │
+// │                                                                        │
+// │ v1.3.0：warn 的说明不再写死为"数据丢失"。                              │
+// │ 原因：warn 已扩展为多种（数据丢失 / 新增待确认技术名 / 技术名消失 /     │
+// │ 合并处职责变化 / 容量单位大小写）。写死一种会让模型**照错方向修正**，   │
+// │ 而校验闭环正是靠这段说明驱动的。现要求模型按工具返回的具体条目处理，    │
+// │ 并说明"折行/拆分技术名列表不会产生消失提醒"（该判定按全文进行）。       │
 // └────────────────────────────────────────────────────────────────────────┘
 
 /** 当前 prompt 版本。任何措辞改动都应递增，便于回溯输出质量变化。 */
-export const PROMPT_VERSION = '1.2.0'
+export const PROMPT_VERSION = '1.3.0'
 
 /** 支持的语言，与工具参数 schema 的 enum 保持一致。 */
 export const SUPPORTED_LANGUAGES = /** @type {const} */ (['zh', 'en'])
@@ -53,8 +59,16 @@ export function RESUME_SYSTEM_PROMPT(language = "zh") {
 - 若返回 ok=false：说明改写引入了原文不存在的数字/机构、或升格了职责、
   或改动了日期、或关键词虚报。你必须**修正后重新校验**，直到 ok=true 才能交付。
   修正原则是删除或改写那些编造内容，绝不允许"保留但说明"。
-- 若返回 ok=true 但有提醒（原文数据在改写后丢失）：评估是否为有意压缩；
-  若不是，补回真实数据后重新校验。
+- 若返回 ok=true 但有提醒（"建议检查"级）：逐条按**工具返回的具体说明**处理，
+  不要把提醒笼统当成"数据丢失"。提醒可能是：
+  ① 原文真实数据在改写后丢失 → 若非有意压缩，补回；
+  ② 新增了原文没有的技术名/缩写 → 确认是否属实，不属实就删掉；
+  ③ 原文技术名消失且无接替 → 确认是有意精简还是换成了模糊表述；
+  ④ 合并条目处疑似抬高职责 → 确认合并后职责强度未变；
+  ⑤ 容量单位大小写变化（如 2MB ↔ 2Mb，bit 与 byte 相差 8 倍）→ 确认是否误改。
+  这些都不阻断交付，但**必须逐条确认**，不可忽略。
+  另外：**折行/拆分技术名列表不会产生"消失"提醒**（该判定按全文进行）；
+  若你看到该类提醒，说明该词在整份简历里确实不复存在了。
 - 未通过校验就交付 = 违反铁律 = 任务失败。
 
 【输出格式】严格按以下结构输出：
@@ -95,8 +109,19 @@ The hard rules cannot rest on good intentions. After rewriting, you MUST call ve
   the original, inflated responsibility, altered a date, or overstated keyword coverage.
   FIX the content and verify again until ok=true before delivering. Remove or rephrase
   the fabricated parts; never "keep but annotate" them.
-- If ok=true with warnings (original data lost in the rewrite), restore genuine metrics
-  unless the omission was intentional, then verify again.
+- If ok=true with warnings ("check suggested"), handle them **by each item the tool
+  actually returns** — do not assume they all mean "data lost". They may be:
+  (a) genuine metrics from the original lost in the rewrite → restore unless intentional;
+  (b) a technology name/abbreviation added that was absent from the original → confirm it
+      is true, delete it if not;
+  (c) a technology name that vanished with no replacement → confirm whether it was
+      intentional trimming or replaced by a vague phrase;
+  (d) possible responsibility inflation where items merged → confirm the level held;
+  (e) a capacity unit's letter case changed (e.g. 2MB ↔ 2Mb; bit and byte differ 8×)
+      → confirm it was not a mistake.
+  Warnings do not block delivery, but each MUST be reviewed; never ignore them.
+  Note: re-wrapping/splitting a technology list does NOT trigger a "vanished" warning
+  (that check runs over the whole document). If you see one, the term is genuinely gone.
 - Delivering without passing verification = violating the hard rules = task failure.
 
 [Output format]

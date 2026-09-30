@@ -3,7 +3,7 @@
 // 分层理由：本文件不 import 任何平台包，因此**在任何机器上都能直接测试**，
 // 且可被零依赖的 src/index.js 安全复用（避免模块双实例问题）。
 import { RESUME_SYSTEM_PROMPT } from './prompt.js'
-import { GUARD_VERSION, normalizeText, verifyRewrite } from './guard.js'
+import { GUARD_VERSION, detectSelfAttestation, normalizeText, verifyRewrite } from './guard.js'
 import { assembleDeliverable, buildDocx, buildText } from './export.js'
 
 /** 模型可见的工具名。 */
@@ -263,9 +263,30 @@ export function buildVerifyValue({ original, rewritten, claimedKeywords } = {}) 
       '把升格的职责动词改回原强度，恢复被改动的日期。' +
       '修正后请再次调用本工具确认通过。'
   } else if (warnCount > 0) {
+    // 【为什么必须按实际 finding 生成，不能写死一句文案（独立审查发现的真实 bug）】
+    // 早期这里写的是"原文的部分真实数据在改写后消失"，但那只是**其中一种** warn。
+    // 本轮新增了 `AMBIGUOUS_NEW_TERM`（新增了待确认的技术名）与
+    // `VANISHED_TECH_TERM`（技术名消失）等 warn 级后，写死的文案会与实际情况不符：
+    // 模型被告知"数据丢失"，而真实问题是"新增了技术名"——它会**照错方向修正**，
+    // 而 `verify_rewrite` 的修正闭环正是靠这段 summary 驱动的。
+    // 故改为按每个 warn finding 的实际 code 归类描述。
+    const warnLabels = /** @type {Record<string, string>} */ ({
+      LOST_NUMBER: '原文的真实量化数据在改写后消失（若非有意压缩，建议保留）',
+      AMBIGUOUS_NEW_TERM: '新增了原文没有的技术名/缩写，需人工确认是否属实',
+      VANISHED_TECH_TERM: '原文的技术名消失且无其它技术名接替，需确认是改成中文表述还是删除',
+      UNIT_CASE_CHANGED: '容量单位的大小写被改动（b/B 是比特与字节，相差 8 倍），需确认是否误改',
+      POSSIBLE_RESPONSIBILITY_INFLATION: '合并条目处疑似抬高了职责，需人工确认',
+    })
+    const warnFindings = report.findings.filter((f) => f.severity === 'warn')
+    const described = [
+      ...new Set(
+        warnFindings.map((f) => warnLabels[f.code] ?? `需人工确认：${f.code}`),
+      ),
+    ]
     summary =
-      `校验通过（无编造），但有 ${warnCount} 处提醒：原文的部分真实数据在改写后消失。` +
-      '若非有意压缩，建议保留这些真实量化结果。'
+      `校验通过（无编造），但有 ${warnCount} 处**待人工确认**：\n` +
+      described.map((d) => `- ${d}`).join('\n') +
+      '\n这些不影响交付，但请自行确认是否属实。'
   } else {
     summary = '校验通过：改写未引入原文不存在的数字或机构，且原文数据均被保留。'
   }
@@ -410,8 +431,10 @@ export const EXPORT_VALUE_SCHEMA = {
     verified: {
       type: 'boolean',
       description:
-        '本次导出是否经过反虚构校验。true = 已由代码校验通过；' +
-        'false = 调用方未提供原文，无法校验（投递前请补做校验）。',
+        '本次导出是否经过反虚构校验。true = 已对照传入的 original 校验通过；' +
+        'false = 调用方未提供原文，无法校验（投递前请补做校验）。' +
+        '注意：true 表示"结果与传入的原文一致"，不表示"传入的原文必定是用户的真实原文"——' +
+        'original 由调用方提供，代码只能校验两者之间的关系。',
     },
     summary: { type: 'string', description: '面向模型的结论摘要' },
   },
@@ -517,7 +540,8 @@ export function buildExportPayload({
  *   verification?: unknown,
  *   includeAppendix?: unknown,
  * }} args 导出参数
- * @param {(path: string, data: Buffer) => Promise<void>} writeFile 写入实现
+ * @param {(path: string, data: Buffer) => Promise<string | void>} writeFile 写入实现
+ *   （可返回实际落盘的绝对路径；返回时以它为准向用户回执）
  * @returns {Promise<object>} 严格匹配 EXPORT_VALUE_SCHEMA 的返回值
  * @throws {Error} 提供了原文且校验不通过时抛错（不写出任何文件）
  */
@@ -533,16 +557,41 @@ export async function exportResume(args, writeFile) {
   // original 与 resume，verifyRewrite 就退化成自反比对——原文等于"改写"，
   // 任何编造都"有据可依"，而返回值还会宣称"校验已通过"。
   // 那比不做这道关更糟：它把"没有校验"伪装成"校验通过"。
-  // 因此原文与结果实质相同时，一律拒绝并说明原因，不得置 verified=true。
+  //
+  // 【为什么判定逻辑放在 guard.js（外部审查发现 S1-3）】
+  // 内联的第一版只做 `trim 后相等` 判定，于是**加任意一行即可绕过**：
+  //   `original = 编造版 + "以上为我的原始简历内容"` → 导出成功且 verified=true。
+  // 现在判定由 {@link detectSelfAttestation} 统一负责（纯函数、有独立测试），
+  // 它是"两处判定必须一致"的唯一事实来源。
+  //
+  // 【两档判据必须区别对待——这是本轮实测抓出的、我自己第一版的缺陷】
+  // 第一版把 `equal` 与 `contains` 都直接拒绝导出，于是**误伤了合法改写**：
+  //   original `- A\n- B` → resume `- A`（模型只是删掉一条经历，一字未改）
+  //   → 被判为"副本"并拒绝 → 用户永久拿不到文件，
+  //     正是 S1-1 那一类**投递死锁**（用户视角：改好了却导不出）。
+  //
+  // 纯文本层面**无法区分**"尾部加了装饰"与"删掉了一条经历"——
+  // 两者都表现为"original = resume + 一小段"。任何阈值只是把误判挪个位置。
+  // 因此按代价不对称处理：
+  //   - `equal`    → **硬拒绝**。两份完全相同必定是传错参数，无歧义，
+  //                  且提示后能立刻改正，不构成死锁。
+  //   - `contains` → **不拒绝**，而是降级为 `verified: false` 并说明原因。
+  //                  既不谎称"已校验"，也不让用户拿不到文件。
+  //                  `original` 本就是不可信输入，既然不存在可靠保证，
+  //                  就不该用一个会误伤的判据去假装有保证。
   const original = a.original
   const resumeText = typeof a.resume === 'string' ? a.resume : ''
   const hasOriginal = typeof original === 'string' && original.trim() !== ''
   let verified = false
+  /** 自证清白的降级说明（`contains` 档），随 summary 一并返回 */
+  let selfAttestNote = ''
+  /** 校验通过但存在 warn 级待确认项（不阻断交付，但回执不得宣称"完全通过"） */
+  /** @type {Array<{ code: string, message: string }>} */
+  let warnFindings = []
 
   if (hasOriginal) {
-    // 比对前统一去首尾空白：normalizeText 只归一化换行，不裁空白，
-    // 若不补这一步，`" 原文 "` 与 `"原文"` 会被判为不同而绕过自证清白检查。
-    if (normalizeText(original).trim() === normalizeText(resumeText).trim()) {
+    const selfAttest = detectSelfAttestation(original, resumeText)
+    if (selfAttest.reason === 'equal') {
       throw new Error(
         '导出已中止：original 与 resume 实质相同，无法构成有效校验。\n' +
           '反虚构校验需要"改写前的原文"作为比对基准；两者相同时校验会退化为自反比对，' +
@@ -567,10 +616,36 @@ export async function exportResume(args, writeFile) {
           '编造的经历会在面试中被问穿，因此这道关不能跳过。',
       )
     }
-    verified = true
+    if (selfAttest.reason === 'contains') {
+      // 校验本身通过，但 original 看起来就是 resume 的副本（仅多出少量文字）。
+      // 无法确定是"伪造的原文"还是"模型删掉了一条经历"，
+      // 因此不宣称"已校验"，也不阻断导出（阻断会造成投递死锁）。
+      selfAttestNote =
+        '注意：传入的 original 与 resume 高度重合（original 仅比 resume 多出少量文字），' +
+        '无法确认它是否真的是改写前的原文——**本次不视为已通过反虚构校验**。' +
+        '若你的原文确实包含被删掉的内容，可忽略此提示；' +
+        '但请自行确认简历中没有编造的数字/经历。'
+    } else {
+      // 【为什么要把 warn 一并带出来（独立审查发现 #3）】
+      // 只触发 warn 时，回执若写"反虚构校验已通过"，而同一份文件里其实
+      // 有一条"请人工确认这些词是否属实"——等于把"有疑点"呈现为"已通过"，
+      // 与本项目"不制造虚假安全感"的原则冲突。
+      // 因此 warn 存在时，把措辞降级为"通过，但有 N 处待人工确认"。
+      verified = true
+      warnFindings = report.findings.filter((f) => f.severity === 'warn')
+    }
   }
 
-  await writeFile(path, payload.data)
+  // 写入实现返回**实际落盘的绝对路径**（装配层负责 resolve）。
+  //
+  // 【存在理由（外部审查发现 S3-5）】
+  // 此前返回值直接回显用户传入的 `outputPath`：参数文档声称它是"绝对路径"，
+  // 但代码既不校验也不解析，于是传入相对路径时，用户拿到的回执
+  // 与文件真实位置不一致——按回执去找文件会找不到。
+  // 现在以写入实现返回的路径为准；未返回时（测试注入的假写入函数）
+  // 回退为 trim 后的入参，不破坏既有契约。
+  const writeResult = await writeFile(path, payload.data)
+  const actualPath = typeof writeResult === 'string' && writeResult !== '' ? writeResult : path
 
   // 附录（改动说明/待补充清单/校验结果）是**元信息**，不参与反虚构校验——
   // 待补充清单列出 JD 要求但简历缺失的技能（如 Vue3、TypeScript）本就是设计意图，
@@ -578,28 +653,35 @@ export async function exportResume(args, writeFile) {
   const withAppendix = a.includeAppendix === true
   return {
     ok: true,
-    path,
+    path: actualPath,
     format: payload.format,
     bytes: payload.data.length,
     verified,
     summary:
-      `已导出 ${payload.format.toUpperCase()} 文件（${payload.data.length} 字节）到 ${path}。` +
+      `已导出 ${payload.format.toUpperCase()} 文件（${payload.data.length} 字节）到 ${actualPath}。` +
       (payload.format === 'docx'
         ? '该文件可直接用于投递；版式为单栏 A4，ATS 可正常解析。'
         : '') +
       (verified
-        ? `反虚构校验已通过（guard ${GUARD_VERSION}）` +
-          (withAppendix
-            ? '；**校验范围仅限简历本体**，附录（改动说明/待补充/校验结果）属元信息，不参与校验。'
-            : '。')
-        : '注意：本次未提供简历原文，因此**未做反虚构校验**——' +
-          '投递前请用 verify_rewrite 补做一次，确认没有编造的数字/机构/职责升格。'),
+        ? warnFindings.length > 0
+          ? // 有 warn 时**不得**笼统说"已通过"——那会把"有疑点"呈现为"已通过"。
+            `反虚构校验通过（guard ${GUARD_VERSION}；对照传入的原文比对），` +
+            `但有 ${warnFindings.length} 处**待人工确认**：\n` +
+            warnFindings.map((f) => `- [${f.code}] ${f.message}`).join('\n')
+          : `反虚构校验已通过（guard ${GUARD_VERSION}；对照传入的原文比对）` +
+            (withAppendix
+              ? '；**校验范围仅限简历本体**，附录（改动说明/待补充/校验结果）属元信息，不参与校验。'
+              : '。')
+        : selfAttestNote !== ''
+          ? selfAttestNote
+          : '注意：本次未提供简历原文，因此**未做反虚构校验**——' +
+            '投递前请用 verify_rewrite 补做一次，确认没有编造的数字/机构/职责升格。'),
   }
 }
 
 /**
  * 导出工具的完整定义（普通对象，零平台依赖）。
- * @param {(path: string, data: Buffer) => Promise<void>} writeFile 写入实现（由装配层注入）
+ * @param {(path: string, data: Buffer) => Promise<string | void>} writeFile 写入实现（由装配层注入）
  * @returns {object} 平台工具定义
  */
 export function createExportToolDefinition(writeFile) {

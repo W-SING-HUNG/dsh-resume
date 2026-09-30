@@ -203,12 +203,21 @@ function stripInlineMarkdown(text) {
  * 将简历 Markdown 解析为结构化段落。
  *
  * 支持的语法（刻意保持精简——只处理简历里真实会出现的写法）：
- *   - `# 标题` / `## 小节` / `### 子小节`
+ *   - `# 标题` … `###### 标题`（1–6 级都识别；4 级及以上统一按三级样式渲染，
+ *     因为简历的视觉层次到三级已足够，更多层级只会让版式变乱）
  *   - `- 要点` / `* 要点` / `+ 要点`（项目符号，支持缩进嵌套）
  *   - 普通段落
  *
  * 行内标记（`**粗体**`、`` `代码` ``、`[文字](链接)`）会被剥离为纯文本；
  * 见 {@link stripInlineMarkdown} 的存在理由。
+ *
+ * 【明确不支持的写法（外部审查 S3-6 要求把边界写在可读处，而非只写在注释里）】
+ *   - 标题必须带空格（`# 标题`）。`###标题` 不是合法 ATX 标题，按普通段落处理
+ *   - **未闭合**的强调标记（`**半截粗体`）不会被剥离，字样原样保留
+ *   - HTML 实体（`&nbsp;`）不做解码，按字面文本输出
+ *   - 表格（`| a | b |`）不做解析，管道符按字面文本输出
+ * 这些都是刻意的取舍：简历导出只需要"文字正确落进 Word"，
+ * 而多余的处理会增加篡改真实文本的风险（参见下划线强调的取舍说明）。
  *
  * @param {string} markdown 简历 Markdown 文本
  * @returns {ResumeBlock[]} 段落序列
@@ -225,9 +234,11 @@ export function parseResumeMarkdown(markdown) {
     const indentWidth = (/^[\t ]*/.exec(rawLine)?.[0] ?? '').replace(/\t/g, '  ').length
     const line = rawLine.trim()
 
-    const heading = /^(#{1,3})\s+(.*)$/.exec(line)
+    // 1–6 级都识别（此前只到 3 级，四级标题会退化成普通段落、丢失加粗）
+    const heading = /^(#{1,6})\s+(.*)$/.exec(line)
     if (heading) {
       const level = heading[1].length
+      // 4 级及以上按 h3 渲染：简历视觉层次到三级已足够
       /** @type {'h1' | 'h2' | 'h3'} */
       const type = level === 1 ? 'h1' : level === 2 ? 'h2' : 'h3'
       out.push({ type, text: stripInlineMarkdown(heading[2]), level: 0 })

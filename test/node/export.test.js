@@ -195,6 +195,33 @@ describe('导出：Markdown 解析', () => {
     assert.equal(blocks[0].level, 0)
     assert.equal(blocks[1].level, 1)
   })
+
+  // ── 明确声明的边界（外部审查 S3-6）──────────────────────────────────
+  //
+  // 这些写法**刻意不支持**，已在 parseResumeMarkdown 的注释里声明。
+  // 把它们写成测试有两个作用：边界被改动时会失败；以及证明"不支持"是有意的，
+  // 而不是忘了处理。
+  test('边界：四级标题也被识别（此前会退化成普通段落）', () => {
+    const blocks = parseResumeMarkdown('#### 四级标题内容')
+    assert.equal(blocks[0].type, 'h3', '4 级及以上按三级样式渲染')
+    assert.equal(blocks[0].text, '四级标题内容')
+  })
+
+  test('边界：`###标题`（无空格）不是合法标题，按普通段落处理', () => {
+    const blocks = parseResumeMarkdown('###标题')
+    assert.equal(blocks[0].type, 'text')
+  })
+
+  test('边界：未闭合的强调标记不做剥离（避免误伤真实文本）', () => {
+    const blocks = parseResumeMarkdown('**半截粗体没有被闭合')
+    assert.equal(blocks[0].text, '**半截粗体没有被闭合')
+  })
+
+  test('边界：HTML 实体与表格管道符按字面输出（不解码、不解析）', () => {
+    const blocks = parseResumeMarkdown('间隔&nbsp;符号\n| 列A | 列B |')
+    assert.equal(blocks[0].text, '间隔&nbsp;符号')
+    assert.equal(blocks[1].text, '| 列A | 列B |')
+  })
 })
 
 describe('导出：ZIP 与 DOCX 结构', () => {
@@ -434,6 +461,25 @@ describe('导出：参数校验与内容组装（纯函数，不触碰文件系�
       assert.equal(payload.data.toString('utf8'), '# 中文内容')
     }
   })
+
+  test('返回值回执写盘的绝对路径，而非回显入参（外部审查 S3-5）', async (t) => {
+    // 缺陷背景：参数文档声称 outputPath 是绝对路径，但代码既不校验也不解析，
+    // 返回值直接回显入参——用户按回执去找文件会找不到。
+    const dir = tempDir(t)
+    const tool = createExportToolDefinition(writeResumeFile)
+    const { relative } = await import('node:path')
+    const { cwd } = await import('node:process')
+    const relPath = relative(cwd(), join(dir, 'rel-out.md'))
+    const r = await tool.execute({
+      resume: '- 负责商品列表开发，性能提升 40%',
+      original: '- 商品列表开发，性能提升 40%',
+      outputPath: relPath,
+    })
+    const { isAbsolute } = await import('node:path')
+    assert.ok(isAbsolute(r.path), '回执路径必须是绝对路径')
+    assert.ok(r.path.endsWith('rel-out.md'))
+    assert.equal(r.path, join(dir, 'rel-out.md'), '回执必须指向真实落盘位置')
+  })
 })
 
 describe('导出：真实写文件（使用临时目录）', () => {
@@ -549,6 +595,121 @@ describe('导出：安全边界（防止毁坏用户文件）', () => {
       /已存在/,
     )
     assert.equal(readFileSync(target, 'utf8'), '用户原有内容', '原文件必须原封不动')
+  })
+
+  // ── 另外两道边界的真实覆盖 ────────────────────────────────────────
+  //
+  // 外部审查发现 S3-4：README/CHANGELOG 声称"三类边界都有测试覆盖"，
+  // 但实际只测了"不覆盖已有文件"一道——另两道（不自动创建目录、拒绝目录路径）
+  // 从未被直接断言。声明了却没测的边界，会在重构中静默失效。
+  // 这里直接调用装配层的 writeResumeFile（而不是复制一份判定逻辑到测试里：
+  // 那样测的是测试自己的实现，边界真被改坏也不会失败）。
+  test('边界：父目录不存在时不自动创建，而是明确报错', async (t) => {
+    const dir = tempDir(t)
+    const target = join(dir, 'no-such-subdir', 'out.md')
+    await assert.rejects(
+      () => writeResumeFile(target, Buffer.from('x')),
+      /目标目录不存在/,
+      '不得静默创建目录树',
+    )
+    assert.equal(existsSync(join(dir, 'no-such-subdir')), false, '目录不得被创建')
+  })
+
+  test('边界：目标是一个已存在的目录时拒绝写入', async (t) => {
+    const dir = tempDir(t)
+    const target = join(dir, 'a-directory')
+    const { mkdirSync } = await import('node:fs')
+    mkdirSync(target)
+    await assert.rejects(() => writeResumeFile(target, Buffer.from('x')), /是一个目录/)
+  })
+
+  test('边界：根目录约束生效，且不以字符串前缀判定', async (t) => {
+    // 前缀陷阱：`<root>-evil` 以 `<root>` 为字符串前缀，但不在根内。
+    // 若用 startsWith 判定，这个用例会写盘成功。
+    const dir = tempDir(t)
+    const root = join(dir, 'allowed')
+    const { mkdirSync } = await import('node:fs')
+    mkdirSync(root)
+    const prev = process.env.DSH_RESUME_EXPORT_ROOT
+    process.env.DSH_RESUME_EXPORT_ROOT = root
+    t.after(() => {
+      if (prev === undefined) delete process.env.DSH_RESUME_EXPORT_ROOT
+      else process.env.DSH_RESUME_EXPORT_ROOT = prev
+    })
+
+    await assert.rejects(
+      () => writeResumeFile(join(dir, 'outside.md'), Buffer.from('x')),
+      /不在允许的导出目录内/,
+    )
+    const sibling = join(dir, 'allowed-evil')
+    mkdirSync(sibling)
+    await assert.rejects(
+      () => writeResumeFile(join(sibling, 'x.md'), Buffer.from('x')),
+      /不在允许的导出目录内/,
+      '同前缀的兄弟目录必须被判为越界',
+    )
+    // 根内正常写入仍须可用，否则约束会变成投递死锁
+    const inside = join(root, 'ok.md')
+    await writeResumeFile(inside, Buffer.from('x'))
+    assert.equal(readFileSync(inside, 'utf8'), 'x')
+  })
+
+  test('边界：`..` 前缀的合法文件名不得被误判为越界（实测误拒）', async (t) => {
+    // `rel.startsWith('..')` 会把根内合法文件名 `..hidden.docx`
+    // 与父目录穿越 `../x` 混为一谈，必须按路径分隔符精确判定。
+    const dir = tempDir(t)
+    const root = join(dir, 'root')
+    const { mkdirSync } = await import('node:fs')
+    mkdirSync(root)
+    const prev = process.env.DSH_RESUME_EXPORT_ROOT
+    process.env.DSH_RESUME_EXPORT_ROOT = root
+    t.after(() => {
+      if (prev === undefined) delete process.env.DSH_RESUME_EXPORT_ROOT
+      else process.env.DSH_RESUME_EXPORT_ROOT = prev
+    })
+
+    const dotdotFile = join(root, '..hidden.docx')
+    await writeResumeFile(dotdotFile, Buffer.from('x'))
+    assert.equal(readFileSync(dotdotFile, 'utf8'), 'x', '根内文件名以 .. 开头是合法的')
+
+    // 真正的父目录穿越必须仍被拦住
+    await assert.rejects(
+      () => writeResumeFile(join(root, '..', 'escape.md'), Buffer.from('x')),
+      /不在允许的导出目录内/,
+    )
+  })
+
+  test('边界：经 junction/symlink 指向根外必须被拦（path.relative 不解析链接）', async (t) => {
+    // 对抗性审查实测：`path.relative` 是纯字符串计算，不解析链接，
+    // 因此"根内的 junction 指向根外"能绕过词法判定。普通用户即可 mklink /J。
+    const dir = tempDir(t)
+    const root = join(dir, 'root')
+    const outside = join(dir, 'outside')
+    const { mkdirSync } = await import('node:fs')
+    mkdirSync(root)
+    mkdirSync(outside)
+    const prev = process.env.DSH_RESUME_EXPORT_ROOT
+    process.env.DSH_RESUME_EXPORT_ROOT = root
+    t.after(() => {
+      if (prev === undefined) delete process.env.DSH_RESUME_EXPORT_ROOT
+      else process.env.DSH_RESUME_EXPORT_ROOT = prev
+    })
+
+    const link = join(root, 'jlink')
+    const { execFileSync } = await import('node:child_process')
+    try {
+      execFileSync('cmd', ['/c', 'mklink', '/J', link, outside], { stdio: 'pipe' })
+    } catch {
+      // 无权限创建链接的环境（如部分 CI 容器）跳过，不算失败
+      t.skip('当前环境无法创建 junction')
+      return
+    }
+    await assert.rejects(
+      () => writeResumeFile(join(link, 'f.md'), Buffer.from('x')),
+      /经由链接指向了允许目录之外/,
+      'junction 不得被用来绕过导出目录限制',
+    )
+    assert.equal(existsSync(join(outside, 'f.md')), false, '根外不得落盘')
   })
 })
 
@@ -701,6 +862,45 @@ describe('导出：交付关（反虚构校验强制生效）', () => {
     )
   })
 
+  // ── S1-3 第二档（contains）：降级而非拒绝 ────────────────────────────
+  //
+  // 【这组用例锁定的是我自己第一版的缺陷（实测抓出）】
+  // 第一版把"original 逐字包含 resume 且仅多出少量文字"也直接**拒绝导出**，
+  // 于是**误伤合法改写**：模型只是删掉一条经历、一字未改（original `- A\n- B`
+  // → resume `- A`）时被判为"副本"并拒绝，用户永久拿不到文件——
+  // 正是 S1-1 那一类投递死锁。
+  //
+  // 纯文本层面无法区分"尾部加了装饰"与"删掉了一条经历"（两者都是
+  // "original = resume + 一小段"），因此改为不对称处理：
+  // 不拒绝，但把 verified 降级为 false 并说明原因——
+  // 既不谎称"已校验"，也不让用户拿不到文件。
+  test('original 是 resume 副本（多出少量装饰）→ 不拒绝导出，但不得谎报已校验', async () => {
+    const FAB = '# 李四\n主导跨境电商中台建设，性能提升 500%'
+    let wrote = false
+    const r = await exportResume(
+      { resume: FAB, original: `${FAB}\n以上为我的原始简历内容`, outputPath: 'a.md' },
+      async () => {
+        wrote = true
+      },
+    )
+    assert.equal(r.ok, true, '不得阻断导出（阻断会造成投递死锁）')
+    assert.equal(wrote, true, '文件应被写出')
+    assert.equal(r.verified, false, '高度重合的 original 不得被当作有效校验基准')
+    assert.match(r.summary, /无法确认/, '必须说明为何不视为已校验')
+    assert.ok(
+      !/反虚构校验已通过/.test(r.summary),
+      '绝不能在 original 可疑时宣称"校验已通过"',
+    )
+  })
+
+  test('合法精简：删掉一条经历（一字未改）→ 必须放行（防止投递死锁）', async () => {
+    // 这是第一版会误拒的真实场景，属 S1-1 同类死锁，代价极高。
+    const original = '项目经历：\n- 负责商品列表页面的开发工作\n- 参与登录模块的重构工作'
+    const resume = '项目经历：\n- 负责商品列表页面的开发工作'
+    const r = await exportResume({ resume, original, outputPath: 'a.md' }, async () => {})
+    assert.equal(r.ok, true, '删掉一条经历是合法精简，不得拒绝导出')
+  })
+
   // ── S1-3：校验范围必须说清（避免"整份文件已校验"的误导）───────────────
   test('含附录时 summary 必须声明校验范围仅限简历本体', async () => {
     const result = await exportResume(
@@ -718,6 +918,31 @@ describe('导出：交付关（反虚构校验强制生效）', () => {
       result.summary,
       /校验范围仅限简历本体/,
       '附录不参与校验时必须声明，不能笼统说"已通过"',
+    )
+  })
+
+  // ── warn 存在时不得宣称"完全通过"（独立审查发现 #3）─────────────────
+  test('存在 warn 级待确认项时，回执不得笼统宣称"已通过"', async () => {
+    // 缺陷背景：此前只要没有 error 就写"反虚构校验已通过"，
+    // 而同一份文件里其实有一条"请人工确认这些词是否属实"的 warn——
+    // 把"有疑点"呈现为"已通过"，与"不制造虚假安全感"的原则冲突。
+    const result = await exportResume(
+      {
+        // `Excel` 原文没有、且落进"歧义标识符"档 → 产生 warn 而非 error
+        resume: '- 负责商品列表开发，熟练使用 Excel，性能提升 40%',
+        original: '- 商品列表开发，性能提升 40%',
+        outputPath: 'a.md',
+      },
+      async () => {},
+    )
+    assert.equal(result.ok, true, 'warn 不得阻断导出')
+    assert.ok(
+      /待人工确认/.test(result.summary),
+      '有 warn 时回执必须显式提示"待人工确认"',
+    )
+    assert.ok(
+      !/反虚构校验已通过/.test(result.summary),
+      '存在待确认项时，不得宣称"已通过"',
     )
   })
 

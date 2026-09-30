@@ -68,17 +68,38 @@ export { buildDocx, buildZip, parseResumeMarkdown, assembleDeliverable } from '.
 // 契约层（core.js）必须保持零 IO、纯函数，这样它可以在任何环境离线测试，
 // 也不会因引入 node:fs 而绑定运行时。IO 属于平台装配，归本文件负责。
 //
-// 安全边界（三条，都是防止毁坏用户文件）：
+// 安全边界（四条，都是防止毁坏用户文件或把文件写到意外位置）：
 //   1. 拒绝目录路径（必须以文件扩展名结尾，且不能是已存在的目录）
 //   2. 拒绝覆盖已存在的文件——用户已有的简历文件不该被静默替换
 //   3. 父目录必须已存在，不自动创建（避免在意外位置生成文件树）
+//   4. 可选根目录约束（环境变量 DSH_RESUME_EXPORT_ROOT）——见下
+
+/**
+ * 读取可选的导出根目录约束。
+ *
+ * 【存在理由（外部审查发现 S2-2）】
+ * `SECURITY.md` 把会话模型定为"不受信任输出源"，而 `outputPath` 是
+ * **模型传入的参数**。夹带在 JD 里的提示词注入可诱导模型在任意**
+ * 已存在**的目录里创建文件。写盘前把路径限制在用户声明的范围内，
+ * 可把这个攻击面收窄。
+ *
+ * 为什么不默认限制：默认值必须让插件开箱可用，而不能要求用户先配路径。
+ * 未设定时不限制，但仍受边界 1-3 约束（尤其"绝不覆盖已有文件"）。
+ *
+ * @returns {string | null} 解析后的绝对根目录；未设定或非法时返回 null（不限制）
+ */
+function exportRoot() {
+  const raw = process.env.DSH_RESUME_EXPORT_ROOT
+  if (typeof raw !== 'string' || raw.trim() === '') return null
+  return raw.trim()
+}
 
 /**
  * 把字节写入用户指定的路径。
  * @param {string} path 目标路径
  * @param {Buffer} data 文件字节
- * @returns {Promise<void>}
- * @throws {Error} 路径非法、已存在或父目录缺失时抛错
+ * @returns {Promise<string>} 实际落盘的绝对路径（供调用方据实回执）
+ * @throws {Error} 路径非法、越界、已存在或父目录缺失时抛错
  */
 export async function writeResumeFile(path, data) {
   const fs = await import('node:fs/promises')
@@ -86,6 +107,63 @@ export async function writeResumeFile(path, data) {
 
   const target = nodePath.resolve(path)
   const parent = nodePath.dirname(target)
+
+  // 边界 4：可选的根目录约束（未设定时不限制）
+  const root = exportRoot()
+  if (root !== null) {
+    const resolvedRoot = nodePath.resolve(root)
+    // 判定分两步，缺一不可：
+    //
+    //   1) 词法判定（path.relative）——挡住 `..` 穿越、绝对越界、
+    //      兄弟目录（`<root>-evil`）。这些在路径字符串层面就能定论。
+    //   2) **经由链接的判定（realpath）**——`path.relative` 是纯字符串计算，
+    //      不解析 symbolic link / Windows junction，因此
+    //      "根内的 junction 指向根外" 能绕过第 1 步写出根外
+    //      （对抗性审查实测：`mklink /J` 普通用户即可创建，非理论攻击）。
+    //      故再对**已存在的父目录**求 realpath 后复判一次。
+    //
+    // 注意 `rel.startsWith('..')` 的经典陷阱：它会把根内合法文件名
+    // `..hidden.docx` 误判为父目录穿越。必须按路径分隔符精确判定。
+    const escapes = (/** @type {string} */ from, /** @type {string} */ to) => {
+      const rel = nodePath.relative(from, to)
+      return rel === '..' || rel.startsWith(`..${nodePath.sep}`) || nodePath.isAbsolute(rel)
+    }
+    if (escapes(resolvedRoot, target)) {
+      throw new Error(
+        `导出已中止：目标路径不在允许的导出目录内。\n` +
+          `允许的目录（DSH_RESUME_EXPORT_ROOT）：${resolvedRoot}\n` +
+          `你要写入的位置：${target}\n` +
+          '请改用允许目录内的路径，或调整 DSH_RESUME_EXPORT_ROOT。',
+      )
+    }
+    // 第 2 步：解析已存在祖先目录的真实位置（父目录可能尚不存在，
+    // 故向上找到第一个存在的祖先再 realpath）。
+    let existing = parent
+    for (;;) {
+      try {
+        existing = await fs.realpath(existing)
+        break
+      } catch {
+        const up = nodePath.dirname(existing)
+        if (up === existing) break // 已到根
+        existing = up
+      }
+    }
+    let realRoot = resolvedRoot
+    try {
+      realRoot = await fs.realpath(resolvedRoot)
+    } catch {
+      realRoot = resolvedRoot
+    }
+    if (escapes(realRoot, existing)) {
+      throw new Error(
+        `导出已中止：目标路径经由链接指向了允许目录之外。\n` +
+          `允许的目录（DSH_RESUME_EXPORT_ROOT）：${realRoot}\n` +
+          `该方法解析到的真实位置：${existing}\n` +
+          '符号链接/junction 不能被用来绕过导出目录限制。',
+      )
+    }
+  }
 
   // 边界 1：不能是已存在的目录
   try {
@@ -124,6 +202,9 @@ export async function writeResumeFile(path, data) {
   }
 
   await fs.writeFile(target, data)
+  // 返回**实际落盘的绝对路径**：调用方据此向用户回执唯一可信的位置。
+  // 若回显入参，用户传入相对路径时回执会与文件真实位置不一致（S3-5）。
+  return target
 }
 
 /**
