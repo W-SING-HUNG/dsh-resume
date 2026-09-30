@@ -2649,6 +2649,44 @@ describe('守卫：自证清白判定（S1-3，交付关依赖它）', () => {
     assert.equal(detectSelfAttestation('很长很长的原文内容在这里', '短文本').selfAttested, false)
   })
 
+  test('纯排版差异（页码/有序列表）不得判为"自证清白"而拒绝导出', () => {
+    // 【实测抓出的误拒】`normalizeText` 会剥掉 markdown 排版成分
+    //（行首序号、页码行），若拿它的结果比相等，下面这种**正常排版差异**
+    // 会被判成"自证清白" → **拒绝导出**：
+    //   原文（无页码）→ 改写（补了 `第 1 页 / 共 1 页`）
+    // 但模型传的确实是两份不同的文本，差异在排版层。
+    // 修法：`equal` 只忽略**空白/换行差异**（同一份文本的两种粘贴形式），
+    // 不忽略内容差异（页码是内容，序号也是内容）。
+    const base = [
+      '## 专业技能',
+      '- 熟悉 Java / Spring Boot / MySQL / Redis 的使用',
+      '',
+      '## 项目经历',
+      '- 使用 Spring Boot 开发订单核心模块，QPS 从 800 提升到 2400；',
+    ].join('\n')
+
+    // 1) 补页码 → 不是自证清白
+    assert.equal(
+      detectSelfAttestation(`${base}\n第 1 页 / 共 1 页\n`, base).reason,
+      '',
+      '补页码是排版差异，不得判为自证清白',
+    )
+    // 2) 改有序列表 → **不得判为 equal**（不硬拒绝）；
+    //    它可能命中 contains 档（只降级 verified，不阻断交付），这是可接受的。
+    const ordered = detectSelfAttestation(base.replace(/^- /gm, '1. '), base)
+    assert.notEqual(
+      ordered.reason,
+      'equal',
+      '无序改有序是排版差异，不得判为"同一份文本"而硬拒绝',
+    )
+    // 3) 但纯空白/换行差异仍应判为自证清白（同一份文本的两种粘贴形式）
+    assert.equal(
+      detectSelfAttestation(`${base}\n\n`, base).reason,
+      'equal',
+      '仅空白差异是同一份文本',
+    )
+  })
+
   test('空输入不判为自证清白（由调用方按"未提供原文"处理）', () => {
     assert.equal(detectSelfAttestation('', ORIGINAL).selfAttested, false)
     assert.equal(detectSelfAttestation(ORIGINAL, '').selfAttested, false)

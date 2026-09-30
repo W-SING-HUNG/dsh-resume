@@ -1318,7 +1318,23 @@ export function detectSelfAttestation(original, rewritten) {
   const o = normalizeText(original).trim()
   const r = normalizeText(rewritten).trim()
   if (o === '' || r === '') return { selfAttested: false, reason: '' }
-  if (o === r) return { selfAttested: true, reason: 'equal' }
+  // 【`equal` 用**仅空白归一化**，不能用 `normalizeText`（实测抓出的误拒）】
+  //
+  // `normalizeText` 会剥掉 markdown 排版成分（行首有序列表序号、页码行等）。
+  // 若拿它的结果比相等，下面这种**正常排版差异**会被判成"自证清白"而拒绝导出：
+  //   原文（无页码）→ 改写（补了 `第 1 页 / 共 1 页`）
+  //   归一化后两者相同 → 判 equal → 拒绝导出
+  // 但模型传的确实是**两份不同的文本**，差异在排版层而非"回填改写结果"。
+  //
+  // 正确语义：`equal` = "调用方显然传了同一份文本"，
+  // 只忽略**空白/换行差异**（同一份文本的两种粘贴形式），
+  // 不忽略任何内容差异（页码是内容，序号也是内容）。
+  const whitespaceOnly = (/** @type {unknown} */ s) =>
+    String(s).replace(/\r\n?/g, '\n').replace(/\s+/g, ' ').trim()
+  if (whitespaceOnly(original) === whitespaceOnly(rewritten)) {
+    return { selfAttested: true, reason: 'equal' }
+  }
+  if (o === r) return { selfAttested: false, reason: '' }
   const flatOriginal = normalizeForSimilarity(o)
   const flatRewritten = normalizeForSimilarity(r)
   // 过短的结果（< 8 字）在任何原文里都可能作为片段出现，
