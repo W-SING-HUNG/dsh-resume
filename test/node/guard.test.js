@@ -1969,6 +1969,43 @@ describe('守卫：结构性判据不得放掉真编造（另一侧锁定）', (
     }
   })
 
+  // ── NOVEL_CONTENT 分级：作为**简历条目**新增的内容是事实主张 ──────────
+  //
+  // 【实测抓出的漏报（我给 NOVEL_CONTENT 分级时自己引入的）】
+  // 分级判据最初是"含数字/机构/技术名/职责动词"，于是这条被误判为
+  // "说明性文字"而**放行**：
+  //   `- 补充：性能优化与容灾设计`     ← 它确实声称了一项新能力
+  // 只是措辞里没有那些特征词。
+  // 修法：加一条结构信号——"该内容是否作为**列表项**（简历条目）出现"。
+  // 真正的说明性文字（落款 `*本简历…*`、导语 `> 以下…`）都不是列表项。
+  test('作为简历条目新增的能力必须拦住（不得当作"说明性文字"放行）', () => {
+    const BASE = [
+      '## 专业技能',
+      '- 熟悉 Java / Spring Boot / MySQL / Redis 的使用',
+      '- 使用 Redis 缓存热点数据，响应时间从 320ms 降到 80ms',
+    ].join('\n')
+    for (const [label, rewritten] of [
+      ['无特征词的新技能', `${BASE}\n- 补充：性能优化与容灾设计\n`],
+      ['加粗的新技能', `${BASE}\n- 补充：**性能优化**与容灾设计\n`],
+      ['纯中文新技能', `${BASE}\n- 掌握分布式系统设计\n`],
+      // ⚠️ 有序列表：`rewrittenText` 已被 normalizeText 剥掉行首序号，
+      // 故判据必须用**未经 normalizeText 的原始输入**（实测踩到，
+      // 第一版修完有序列表仍然漏）。
+      [
+        '有序列表化的新技能',
+        BASE.replace('- 熟悉 Java / Spring Boot / MySQL / Redis 的使用',
+          '1. 熟悉 Java / Spring Boot / MySQL / Redis 的使用\n2. 掌握系统架构设计'),
+      ],
+    ]) {
+      const report = verifyRewrite({ original: BASE, rewritten })
+      assert.equal(report.ok, false, `作为简历条目新增的能力必须拦下（${label}）：${rewritten}`)
+      assert.ok(
+        report.findings.some((f) => f.code === 'NOVEL_CONTENT' && f.severity === 'error'),
+        `必须报出 error 级 NOVEL_CONTENT（${label}）`,
+      )
+    }
+  })
+
   // ── "收缩写法"不得成为"另起一行新增技能"的挡箭牌（第四次绕过后的根本约束）──
   //
   // 【为什么这组用例至关重要】

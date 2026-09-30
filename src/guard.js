@@ -3300,8 +3300,36 @@ export function verifyRewrite({ original, rewritten, claimedKeywords } = {}) {
     rewrittenText
       .split('\n')
       .some((line) => /^\s*#{1,6}\s/.test(line) && line.includes(unit.replace(/^#+\s*/, '').trim()))
+  /**
+   * 该单元是否作为**列表项**（简历条目）出现在改写文本里。
+   *
+   * 【为什么这是"含事实主张"的结构信号（实测抓出的漏报）】
+   * 我给 NOVEL_CONTENT 分级时用了"含数字/机构/技术名/职责动词"作判据，
+   * 于是下面这条被误判为"说明性文字"而放行：
+   *   `- 补充：性能优化与容灾设计（A/B 测试）`
+   * 它确实**声称了一项新能力**，只是措辞里没有那些特征词。
+   * 而真正的说明性文字（落款、章节导语）**不是列表项**：
+   *   `*本简历由本人独立撰写*`、`> 以下为在校期间荣誉`
+   * 故"是否以列表标记开头"是一个可靠的结构区分。
+   *
+   * ⚠️ 两个坑，都实测踩到过：
+   *  1. 单元来自**已剥离 markdown** 的文本（`stripMarkdownSyntax` 去掉了 `**`），
+   *     因此必须拿**剥离后的行**去匹配——否则 `**性能优化**` 这种加粗写法匹配不上。
+   *  2. `rewrittenText` 已经过 `normalizeText`，而它会**剥掉行首列表序号**
+   *     （`1. 掌握 X` → `掌握 X`）。直接用它判断"是不是列表项"会永远失败，
+   *     于是有序列表化后的新增技能仍被当成"说明性文字"放行。
+   *     故这里必须用**未经 normalizeText 的原始输入** `rewritten`。
+   */
+  const isListItem = (/** @type {string} */ unit) =>
+    stripMarkdownSyntax(/** @type {string} */ (rewritten))
+      .split('\n')
+      .some((line) => {
+        if (!/^\s*(?:[-*+]|\d+[.)])\s+/.test(line)) return false
+        return line.replace(/^\s*(?:[-*+]|\d+[.)])\s+/, '').trim().includes(unit.trim())
+      })
   const claimsFacts = (/** @type {string} */ unit) => {
     if (isOnHeadingLine(unit)) return true // 标题行新增 = 多了一个章节/项目
+    if (isListItem(unit)) return true // 作为简历条目新增 = 一项能力/经历主张
     if (/\d/.test(unit)) return true // 含数字（量化结果/日期）
     if (extractChineseOrgNames(unit).size > 0) return true // 含机构名
     if (extractLatinProperNouns(unit).size > 0) return true // 含拉丁专名
