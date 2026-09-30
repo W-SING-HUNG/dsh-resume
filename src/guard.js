@@ -285,32 +285,27 @@ const EN_STOPWORDS = new Set(
     'publications',
     'achievements',
     'extracurricular',
-    'contact',
-    'email',
-    'phone',
-    'location',
-    'linkedin',
-    'github',
-    'website',
-    'present',
-    'current',
-    'responsible',
-    'developed',
-    'led',
-    'built',
-    'managed',
-    'designed',
-    'implemented',
-    'improved',
-    'the',
-    'and',
-    'for',
-    'with',
-    'from',
-    'this',
-    'that',
-    'using',
-    'used',
+    // 【补齐常见"简历栏目名"（真实简历实测抓出的分类不一致）】
+    // 词表里原本有 `skills`/`education`/`projects`/`internship`/`awards`，
+    // 却漏了下面这些**同样常见且同为纯栏目名**的词。后果是分类不一致：
+    //   `## 专业技能（Skills）` 放行，而 `## 校园经历（Campus）` **拒绝导出**。
+    // 实测 11 个常见栏目名被误判为"专有技术名"（error 级），
+    // 每个都会阻断交付——属"用户拿不到文件"的死锁。
+    // 这些词都是**普通英文名词**，不含任何技术栈主张，
+    // 归入通用词表（warn 级）与 `skills` 等既有条目保持一致。
+    'objective',
+    'campus',
+    'volunteer',
+    'activities',
+    'activity',
+    'interests',
+    'languages',
+    'coursework',
+    'overview',
+    'background',
+    'qualification',
+    'qualifications',
+    'accomplishments',
   ].map((w) => w.toLowerCase()),
 )
 
@@ -2541,6 +2536,45 @@ export function verifyRewrite({ original, rewritten, claimedKeywords } = {}) {
   const originalUnitsForNovel = extractContentUnits(originalText)
   const rewrittenUnitsForNovel = extractContentUnits(rewrittenText)
   const survivors = novelCheck.novel.filter((unit) => {
+    // ⓪ "标题 + 通用英文词注记"不是新增内容。
+    //
+    // 【为什么（真实简历实测抓出的误报，且此前无解）】
+    // 标题加英文对照会把标题"撑"进内容单元（原标题不足 8 字、本不是单元）：
+    //   `## 专业技能` → `## 专业技能（Skills）`
+    // 于是它与原文任何单元都对不上 → 判 NOVEL_CONTENT → **拒绝导出**。
+    //
+    // 【为什么这次能安全修好，而上一轮"剥括号"方案被判净亏损回退】
+    // 上一轮的做法是"剥掉任意括号再看原文有没有"——那会放过
+    // `## 项目经历（用户增长系统）`（剥掉得 `项目经历`，原文确实有）。
+    // 本轮的判据多了一个**必要的限定**：括号内容必须是
+    // **一个通用英文词**（`Skills`/`Education`/`Projects`），
+    // 即守卫**已判定为"泛指、非专名"**的那一类（{@link extractAmbiguousLatinTokens}）。
+    //   · `（Skills）` → 通用英文词 → 是"标题的英文对照" → 放行 ✅
+    //   · `（Redis）` → 专有技术名 → 可能是夹带技能 → 照常拦 ✅
+    //   · `（2024）` → 含数字 → 不是英文对照 → 照常拦 ✅
+    //   · `（用户增长系统）` → 含汉字 → 不是英文对照 → 照常拦 ✅
+    //   · `（Random Keyspace）` → 多词专名 → 照常拦 ✅
+    // 实测这三类"该拦"的用例全部仍然拦住（见 guard.test.js 的成对用例）。
+    const annotations = [...unit.matchAll(/[（(【\[]([^）)】\]]*)[）)】\]]/g)]
+    if (annotations.length > 0) {
+      const strippedUnit = unit.replace(/[（(【\[][^）)】\]]*[）)】\]]/g, '').replace(/\s+/g, '')
+      const onlyGenericEnglishAnnotations = annotations.every((m) => {
+        const inner = m[1].trim()
+        // 必须是**单个通用英文词**：不含汉字、不含数字、无空格/分隔符
+        if (/[\u4e00-\u9fa5]/.test(inner)) return false
+        if (/\d/.test(inner)) return false
+        if (!/^[A-Za-z][A-Za-z-]*$/.test(inner)) return false
+        // 且守卫把它判为"泛指词"（而非专有技术名）
+        return extractAmbiguousLatinTokens(inner).has(inner)
+      })
+      if (
+        strippedUnit !== '' &&
+        onlyGenericEnglishAnnotations &&
+        normalizeForSimilarity(originalText).includes(normalizeForSimilarity(strippedUnit))
+      ) {
+        return false
+      }
+    }
     const grams = charBigrams(normalizeForSimilarity(unit))
     let bestUnit = ''
     let bestScore = 0

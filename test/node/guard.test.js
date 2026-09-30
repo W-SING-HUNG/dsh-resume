@@ -1412,16 +1412,90 @@ describe('守卫：结构性判据不得放掉真编造（另一侧锁定）', (
     )
   })
 
-  test('已知误报：标题加英文对照（中文括号内容，暂接受误拒）', () => {
-    const report = verifyRewrite({
-      original: '# 张伟\n## 专业技能\n- 熟悉 Java；',
-      rewritten: '# 张伟\n## 专业技能（Skills）\n- 熟悉 Java；',
-    })
-    assert.equal(
-      report.ok,
-      false,
-      '当前判定为误报（已知）——若此断言失败，说明判据已改进，请同步更新本用例与 CHANGELOG',
-    )
+  // ── 标题 + 通用英文词注记（误报已修，且不得借此夹带）──────────────────
+  //
+  // 【为什么这类特判是安全的，而上一轮"剥括号"方案被判净亏损回退】
+  // 上一轮是"剥掉任意括号再看原文有没有"——会放过 `## 项目经历（用户增长系统）`
+  // （剥掉得 `项目经历`，原文确实有）。
+  // 本轮的判据多了两条**必要限定**：
+  //   ① 括号内容必须是**单个通用英文词**（守卫已判为"泛指、非专名"，
+  //      即 `extractAmbiguousLatinTokens` 收录的那类：Skills/Education/Projects）；
+  //   ② 剥掉括号后的标题须在原文里出现过。
+  // 于是 `（Redis）`（专名）、`（2024）`（数字）、`（用户增长系统）`（汉字）、
+  // `（Random Keyspace）`（多词）**全部仍被拦**（下方成对用例锁定）。
+  test('标题加通用英文词对照必须放行（标题被撑成内容单元的误报）', () => {
+    for (const [title, annotated] of [
+      ['专业技能', '专业技能（Skills）'],
+      ['教育背景', '教育背景（Education）'],
+      ['项目经历', '项目经历（Projects）'],
+      ['实习经历', '实习经历（Internship）'],
+    ]) {
+      const report = verifyRewrite({
+        original: `# 张伟\n## ${title}\n- 熟悉 Java；`,
+        rewritten: `# 张伟\n## ${annotated}\n- 熟悉 Java；`,
+      })
+      assert.deepEqual(
+        report.findings.filter((f) => f.severity === 'error').map((f) => f.code),
+        [],
+        `标题并列英文对照是 ATS 常见写法，不得拒绝导出：${annotated}`,
+      )
+    }
+  })
+
+  test('但括号里是专名/数字/中文/多词时仍按新增内容拦下', () => {
+    for (const [title, annotated] of [
+      ['项目经历', '项目经历（Redis）'], // 专有技术名
+      ['项目经历', '项目经历（2024）'], // 数字（凭空加年份）
+      ['项目经历', '项目经历（用户增长系统）'], // 汉字（编造项目名）
+      ['项目经历', '项目经历（Random Keyspace）'], // 多词专名
+      ['项目经历', '项目经历（Very Fast Cache）'], // 多词
+    ]) {
+      const report = verifyRewrite({
+        original: `# 张伟\n## ${title}\n- 熟悉 Java；`,
+        rewritten: `# 张伟\n## ${annotated}\n- 熟悉 Java；`,
+      })
+      assert.equal(
+        report.ok,
+        false,
+        `借标题括号夹带原文没有的内容必须拦下：${annotated}`,
+      )
+    }
+  })
+
+  test('常见简历栏目的英文名不得被误判为专有技术名', () => {
+    // 【真实简历实测抓出的分类不一致】
+    // `EN_STOPWORDS` 里原本有 skills/education/projects/internship/awards，
+    // 却漏了同样常见的 objective/campus/volunteer/activities/interests/
+    // languages/coursework/overview/background/qualification/accomplishments。
+    // 后果：`## 专业技能（Skills）` 放行，而 `## 校园经历（Campus）` **拒绝导出**。
+    for (const heading of [
+      'Summary', 'Objective', 'Profile', 'Experience', 'Education', 'Skills',
+      'Projects', 'Internship', 'Campus', 'Awards', 'Certifications',
+      'Publications', 'Volunteer', 'Activities', 'Interests', 'Languages',
+      'Training', 'Achievements', 'Honors', 'Coursework', 'Research',
+      'Leadership', 'Overview', 'Background', 'Qualification', 'Accomplishments',
+    ]) {
+      const report = verifyRewrite({
+        original: `# 张伟\n## 中文栏目\n- 熟悉 Java；`,
+        rewritten: `# 张伟\n## 中文栏目（${heading}）\n- 熟悉 Java；`,
+      })
+      assert.deepEqual(
+        report.findings.filter((f) => f.severity === 'error').map((f) => f.code),
+        [],
+        `栏目名「${heading}」是普通英文名词，不得阻断交付`,
+      )
+    }
+  })
+
+  test('但具体技术名仍必须判为专名（补词表不得误伤）', () => {
+    // 反向锁定：上一用例给词表补了栏目名，不能因此把技术名也放进通用词表。
+    for (const tech of ['Redis', 'Kubernetes', 'Kafka', 'Docker', 'MySQL', 'React', 'SCSS', 'Golang']) {
+      const report = verifyRewrite({
+        original: '- 熟悉 Java；',
+        rewritten: `- 熟悉 Java；\n- 熟悉 ${tech}；`,
+      })
+      assert.equal(report.ok, false, `具体技术名「${tech}」必须仍被拦下`)
+    }
   })
 
   // ── "收缩写法"不得成为"另起一行新增技能"的挡箭牌（第四次绕过后的根本约束）──
