@@ -38,11 +38,12 @@ export const GUARD_LIMITATIONS = [
   '数字按 token 比对，不做语义判断：把「提升 40%」改成「提升四成」不会被发现。',
   '职责升格检测基于中文动词词表，措辞避开词表的同义升格（如「深度参与」→「全权负责」以外的变体）可能漏检。',
   '整条新增检测按字级相似度判定（阈值校准为 0.25）：与原文任何条目都无重合的内容会被报出；但"把原有经历改写得面目全非"可能被误报为新增，需人工确认。',
+  '拉丁专名检测只认首字母大写、且跳过行内第一个拉丁词。因此**小写技术名**（redis / mysql / kafka）与**行首技术名**（"TypeScript 工程化改造"）不会被这道检查识别——它们在中文简历里极常见（"使用 Vue2 编写"里的 Vue2 就落在行首）。此类编造目前只能靠"整条新增检测"兜底，若改写把它塞进已有条目则可能漏检。',
   '本校验只做文本特征比对，不判断内容是否真实。它拦得住"与原文对不上"的编造，拦不住"原文本身就写了假的"。',
 ]
 
 /** 守卫版本。判定规则变化时递增，便于回溯误报/漏报。 */
-export const GUARD_VERSION = '1.0.0'
+export const GUARD_VERSION = '1.0.1'
 
 /**
  * 中文机构名后缀。用于识别"改写后新出现的机构"。
@@ -312,9 +313,22 @@ export function extractDateTokens(text) {
   if (src === '') return out
 
   // 先处理"年月"形态，避免被下面的裸年份规则重复计入
+  //
+  // 【为什么月份必须有 1-12 约束、且末尾要加 (?!\d)】
+  // 早期实现写的是 `(\d{1,2})`，无合法域也不设右界，于是它会把
+  // **根本不是日期的东西**啃成日期：
+  //   `2019 - 2021`   → `2019-20`（月份 20，不存在的日期）
+  //   `138-0000-0000` → `0000-00`
+  // 后果不只是"多一个假日期"——日期集合是与数字集合做差集比对的，
+  // 假日期会把真实的年份挤出 `dateYears`，使合法改写被误判为编造。
+  // 实测（修复前）：`8万 → 80000`、`2026.03 → 2026年3月`、
+  // `12000 → 1.2万` 全部被拒，用户永久拿不到文件。
+  //
+  // `(?!\d)` 用来堵回溯：`2019-2021` 里 `20` 因 >12 失败后，
+  // 正则会退而匹配单个 `2`——那会得到 `2019-02`，同样错误。
   const consumed = []
   const ymPatterns = [
-    /(\d{4})\s*[年.\-/]\s*(\d{1,2})\s*月?/g, // 2019年6月 / 2019.06 / 2019-6
+    /((?:19|20)\d{2})\s*[年.\-/]\s*(0?[1-9]|1[0-2])(?!\d)\s*月?/g,
   ]
   let masked = src
   for (const re of ymPatterns) {
@@ -390,6 +404,19 @@ const STRUCTURAL_LINE_PATTERNS = [
   // 纯联系方式行：邮箱或手机号单独成行
   /^[\w.+-]+@[\w.-]+\.\w+$/,
   /^1[3-9]\d{9}$/,
+  // 含联系方式的头部行（含手机/座机的常见分隔写法）
+  //
+  // 【为什么必须单独加这条（外部审查发现）】
+  // 简历头部的实际写法常常没有字段标签，而是「职位 | 电话 | 邮箱」这种
+  // 竖线分隔行——实测 `前端开发工程师 | 138-0000-0000 | xxx@example.com`
+  // 不匹配上面任何一条，于是被"整条新增检测"报为凭空新增。
+  // 它只会多报（同一件事既进数字检查又进新增检查），
+  // 对用户表现为提示混乱，且错误信息会诱导模型删掉真实联系方式。
+  //
+  // 边界：本规则只豁免"整条新增检测"；该行里的数字/机构
+  // 仍由各自检查全量比对，编造的联系方式一样会被抓住。
+  /(?:\+?86[-\s]?)?1[3-9]\d[-\s]?\d{4}[-\s]?\d{4}/,
+  /\b[\w.+-]+@[\w.-]+\.\w{2,}\b/,
 ]
 
 /**
@@ -617,10 +644,46 @@ export function normalizeText(input) {
 }
 
 /**
+ * 中文数量级词 → 倍率。
+ *
+ * 【存在理由（实测）】
+ * 同一个数值在中文简历里有多种等价写法，早期实现把它们当成不同数字，
+ * 于是"把 8 万写成 80000"这类**纯格式改写**被判为编造并拒绝导出。
+ * 实测（修复前）：`服务 8 万用户 → 服务 80000 用户` 与
+ * `商品列表 12000 个 → 商品列表 1.2 万个` 均被拒。
+ * 这类改写是模型对齐 ATS 时的常规动作，封死它等于封死主链路。
+ *
+ * 注意这只统一**写法**，不放宽判定：`8 万 → 80 万` 仍会被抓，
+ * 因为归一化后一个是 80000、一个是 800000，仍然不同。
+ */
+const CN_MAGNITUDES = /** @type {const} */ ([
+  ['亿', 1e8],
+  ['万', 1e4],
+  ['千', 1e3],
+])
+
+/**
+ * 把带中文数量级的数字归一化为纯数字串（`1.2万` → `12000`）。
+ * @param {string} digits 数字部分（如 `1.2`）
+ * @param {string} unit 数量级词（如 `万`）
+ * @returns {string} 归一化后的数字串；无法精确表示时退回原写法
+ */
+function applyMagnitude(digits, unit) {
+  const magnitude = CN_MAGNITUDES.find(([u]) => u === unit)?.[1]
+  if (magnitude === undefined) return `${digits}${unit}`
+  const value = Number(digits) * magnitude
+  // 只接受有限、非负、且能用十进制精确表示的乘积；
+  // 否则（如浮点误差）退回原写法，宁可保守也不制造假等价。
+  if (!Number.isFinite(value) || value < 0) return `${digits}${unit}`
+  return String(value)
+}
+
+/**
  * 提取文本中的数字 token（含全角数字）。
  *
- * 归一化规则：全角转半角、去掉千分位逗号、去掉尾部小数点。
- * 例：'1,200.' → '1200'；'４０%' → '40'
+ * 归一化规则：全角转半角、去掉千分位逗号、去掉尾部小数点、
+ * **统一中文数量级写法**（`1.2万` → `12000`）。
+ * 例：'1,200.' → '1200'；'４０%' → '40'；'8 万' → '80000'
  *
  * ⚠️ 调用方注意：本函数会**把日期也当成数字**（`2019.06`）。
  * 日期有专门的检查项（{@link extractDateTokens}），因此
@@ -638,9 +701,28 @@ export function extractNumericTokens(text) {
   if (src === '') return out
   // 全角数字先转半角，否则 '４０%' 这类会被漏掉
   const normalized = src.replace(/[０-９]/g, (c) => String(FULLWIDTH_DIGITS.indexOf(c)))
-  for (const m of normalized.matchAll(/\d[\d,.]*/g)) {
-    const token = m[0].replace(/,/g, '').replace(/\.$/, '')
-    if (token !== '') out.add(token)
+
+  // ── 先抽取"联系方式数字"（手机/座机），整体归一化后再参与比对 ──
+  //
+  // 【存在理由（实测）】`13800000000` 与 `138-0000-0000` 是同一个号码的
+  // 两种写法。早期实现按组分段抽取（`138`、`0000`），于是
+  // "给电话加连字符"这种纯排版动作会被判成"多出数字 0000、138"，
+  // 合法改写被拒。号码是事实字段，写法差异不该算编造。
+  // 用占位符替换掉，避免后面被当普通数字重复抽取。
+  const contactRe = /(?<!\d)(1[3-9]\d)[-\s]?(\d{4})[-\s]?(\d{4})(?!\d)/g
+  const masked = normalized.replace(contactRe, (_full, a, b, c) => {
+    out.add(`${a}${b}${c}`)
+    return ' '
+  })
+
+  // 数字主体：允许小数与千分位；其后可紧跟中文数量级词（允许中间有空格）
+  for (const m of masked.matchAll(/(\d[\d,.]*)\s*(亿|万|千)?/g)) {
+    const raw = m[1]
+    const unit = m[2]
+    const token = raw.replace(/,/g, '').replace(/\.$/, '')
+    if (token === '') continue
+    // 带数量级词时归一化为纯数字（`1.2万` → `12000`）
+    out.add(unit === undefined ? token : applyMagnitude(token, unit))
   }
   return out
 }
@@ -652,9 +734,13 @@ export function extractNumericTokens(text) {
  * 数字检查会把 `2019.06` 当成"新出现的数字"而误报。
  * 日期本该由专门的日期检查负责，数字检查必须让路。
  *
- * 剔除规则：
- *   - 形如 `YYYY.MM` / `YYYY.MM.DD` 的复合 token
- *   - 与任一日期 token 的年份部分相同的纯年份 token（如 `2019`）
+ * 【为什么还要剔除"年份分量 + 月份分量"】（第二层缺陷，实测）
+ * 仅剔复合 token 不够。`2026年3月` 抽出的数字是 `2026` 与 `3`
+ * （两个独立 token），而 `2026.03` 抽出的是复合 token `2026.03`——
+ * 两者形态不同，于是 `2026.03 → 2026年3月` 这类**纯格式规范化**
+ * 会被判成"多出一个数字 3"，合法改写被拒。
+ * 因此凡是与某个日期同年/同月的裸数字，一律视为日期成分一并剔除。
+ * 这不会放过编造：日期本身由 FABRICATED_DATE 检查负责。
  *
  * @param {Set<string>} numbers 数字 token 集合
  * @param {Set<string>} dates 日期 token 集合（形如 `YYYY-MM` 或 `YYYY`）
@@ -662,12 +748,25 @@ export function extractNumericTokens(text) {
  */
 export function subtractDateTokens(numbers, dates) {
   const out = new Set()
-  const dateYears = new Set([...dates].map((d) => d.slice(0, 4)))
+  // 日期涉及的年份与月份分量（`2026-03` → 年份 2026、月份 03/3）
+  const dateYears = new Set()
+  const dateMonths = new Set()
+  for (const d of dates) {
+    dateYears.add(d.slice(0, 4))
+    if (d.length === 7) {
+      const month = d.slice(5)
+      dateMonths.add(month)
+      // 月份同时收纳去零形态，覆盖 `3` 与 `03` 两种写法
+      dateMonths.add(String(Number(month)))
+    }
+  }
   for (const n of numbers) {
     // 复合日期 token（2019.06 / 2019.06.01）
     if (/^(19|20)\d{2}\.\d{1,2}(\.\d{1,2})?$/.test(n)) continue
     // 与已知日期同年的裸年份
     if (/^(19|20)\d{2}$/.test(n) && dateYears.has(n)) continue
+    // 与已知日期同月的裸月份（`2026年3月` 里的 `3`）
+    if (/^\d{1,2}$/.test(n) && dateMonths.has(n)) continue
     out.add(n)
   }
   return out

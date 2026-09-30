@@ -44,6 +44,26 @@ describe('守卫：文本与 token 提取', () => {
     assert.ok(tokens.has('40'), '全角数字应转为半角后提取')
   })
 
+  // ── 等价写法归一化（外部审查发现的投递死锁，回归锁定）───────────────
+  //
+  // 背景：早期实现把"同一数值的不同写法"当成不同数字，于是模型做
+  // ATS 对齐时最常见的三类动作——中文数量级换算、日期格式规范化、
+  // 联系方式加分隔符——全部被判为编造并**拒绝导出**，用户永久拿不到文件。
+  // 更糟的是错误指令要求"删除编造内容"，模型照做会删掉用户真实电话。
+  test('中文数量级写法归一化为同一数值（8万 = 80000）', () => {
+    assert.deepEqual([...extractNumericTokens('服务 8 万用户')], ['80000'])
+    assert.deepEqual([...extractNumericTokens('服务 80000 用户')], ['80000'])
+    assert.deepEqual([...extractNumericTokens('商品 1.2 万个')], ['12000'])
+    assert.deepEqual([...extractNumericTokens('商品 12000 个')], ['12000'])
+    assert.deepEqual([...extractNumericTokens('服务 8 亿')], ['800000000'])
+  })
+
+  test('联系方式的分隔符写法归一化为同一号码', () => {
+    assert.deepEqual([...extractNumericTokens('手机 138-0000-0000')], ['13800000000'])
+    assert.deepEqual([...extractNumericTokens('手机 13800000000')], ['13800000000'])
+    assert.deepEqual([...extractNumericTokens('手机 138 0000 0000')], ['13800000000'])
+  })
+
   test('extractChineseOrgNames 识别机构名', () => {
     const names = extractChineseOrgNames('在某某科技有限公司与清华大学实习')
     assert.ok([...names].some((n) => n.endsWith('公司')))
@@ -430,6 +450,82 @@ describe('守卫：整条新增检测（特征比对抓不住的造假）', () =
     assert.equal(report.ok, false, '改掉电话号必须被数字检查抓住')
     assert.ok(report.findings.some((f) => f.code === 'FABRICATED_NUMBER'))
   })
+})
+
+// ── 投递主链路不得死锁（外部审查发现的 S1，回归锁定）──────────────────
+//
+// 这组用例针对的是一个**流水线全绿但产品不可用**的缺陷：
+// 既有测试全部使用单行文本，因此"日期/数值/联系方式的等价写法被误判"
+// 这条主链路问题从未被覆盖，而它会让用户永久拿不到导出文件。
+// 教训：守卫的测试必须用**真实长度的简历文本**，单行样本测不出这类问题。
+describe('守卫：等价写法不得被误判为编造（投递链路）', () => {
+  const allow = [
+    ['日期格式规范化', '实习 2026.03 开始', '实习 2026年3月开始'],
+    ['反向日期规范化', '2026年3月入职', '2026.03 入职'],
+    ['中文数量级换算', '服务 8 万用户', '服务 80000 用户'],
+    ['小数数量级换算', '商品列表 12000 个', '商品列表 1.2 万个'],
+    ['年份区间被误当月份', '在职 2019 - 2021', '在职 2019.06 - 2021.08'],
+    ['联系方式加分隔符', '手机 13800000000', '手机 138-0000-0000'],
+  ]
+  for (const [name, original, rewritten] of allow) {
+    test(`合法改写必须放行：${name}`, () => {
+      const report = verifyRewrite({ original, rewritten })
+      const errors = report.findings.filter((f) => f.severity === 'error')
+      assert.deepEqual(
+        errors.map((f) => f.code),
+        [],
+        `等价写法不得报错，否则用户无法导出：${name}`,
+      )
+    })
+  }
+
+  test('补全简历头部（联系方式源自原文）必须放行', () => {
+    // 真实场景：用户原文里已有电话与邮箱（格式可能不规范），
+    // 改写把它们规整进头部。这些是**原文已有的事实**，不得判为编造。
+    //
+    // 注意：不能反过来要求"原文没有电话也必须放行"——模型无从知道
+    // 用户真实号码，凭空补一个正是本项目要拦的编造（HR 打过去是空号）。
+    // 原文确实缺联系方式时，正确做法是让用户提供后并入原文
+    // （core.js 的拒绝信息里给了这条出路）。
+    const report = verifyRewrite({
+      original: '138-0000-0000 candidate@example.com\n- 负责商品列表开发，性能提升 40%',
+      rewritten:
+        '# 张三\n前端开发工程师 | 13800000000 | candidate@example.com\n\n' +
+        '## 项目经历\n- 负责商品列表开发，性能提升 40%',
+    })
+    assert.deepEqual(
+      report.findings.filter((f) => f.severity === 'error').map((f) => f.code),
+      [],
+      '原文已有的联系方式被规整进头部，不得报错',
+    )
+  })
+
+  test('无标签的「职位 | 电话 | 邮箱」头部行不触发整条新增检测', () => {
+    // 实测缺陷：这类头部行不匹配任何字段名规则，曾被报为凭空新增，
+    // 与数字检查重复报告同一件事，还会诱导模型删掉真实联系方式。
+    const report = verifyRewrite({
+      original: '13800000000 前端开发\n- 负责商品列表开发',
+      rewritten: '前端开发工程师 | 13800000000 | a@example.com\n- 负责商品列表开发',
+    })
+    assert.ok(
+      !report.findings.some((f) => f.code === 'NOVEL_CONTENT'),
+      '含联系方式的头部行不应被判为凭空新增',
+    )
+  })
+
+  // 反向：归一化不得放宽判定
+  const block = [
+    ['数值真的被改', '提升 40%', '提升 65%'],
+    ['数量级被放大', '服务 8 万用户', '服务 80 万用户'],
+    ['换了手机号', '手机 13800000000', '手机 13911112222'],
+    ['日期真的被改', '2020年入职', '2023年入职'],
+  ]
+  for (const [name, original, rewritten] of block) {
+    test(`真实编造必须拦下：${name}`, () => {
+      const report = verifyRewrite({ original, rewritten })
+      assert.equal(report.ok, false, `归一化不得放过真实改动：${name}`)
+    })
+  }
 })
 
 describe('守卫：防误报（误报会让守卫被忽略，比漏报更糟）', () => {
