@@ -1641,6 +1641,58 @@ describe('守卫：结构性判据不得放掉真编造（另一侧锁定）', (
     }
   })
 
+  // ── "英文翻译"不得被判为新增技术名 ──────────────────────────────────
+  //
+  // 【为什么】中文术语/学科名/项目名并列英文写法时，括号内是**英文翻译**：
+  //   `Verilog Hardware Description Language`、
+  //   `电子信息工程（Electronic Information Engineering）`、
+  //   `智能小车控制系统（Smart Car Control System）`
+  // 其中 Hardware/Description/Electronic/Information/Smart/Car 等是普通英文名词，
+  // 但它们原本不在词表里 → 被判"新增技术名" → **拒绝导出**。
+  // 与"常见简历栏目名漏收""英文全称里的通用词漏收"是同一类问题。
+  test('中文名并列英文翻译必须放行', () => {
+    for (const [original, rewritten] of [
+      ['- 熟悉 Verilog HDL 硬件描述语言', '- 熟悉 Verilog Hardware Description Language'],
+      ['- 电子信息工程', '- 电子信息工程（Electronic Information Engineering）'],
+      ['- 智能小车控制系统', '- 智能小车控制系统（Smart Car Control System）'],
+      ['- 熟悉 PID 调速', '- 熟悉 PID（比例-积分-微分）调速'],
+    ]) {
+      const report = verifyRewrite({ original, rewritten })
+      assert.deepEqual(
+        report.findings.filter((f) => f.severity === 'error').map((f) => f.code),
+        [],
+        `英文翻译是等价写法，不得拒绝导出：${rewritten}`,
+      )
+    }
+  })
+
+  test('但真实技术名仍必须判为专名（翻译词补表不得误伤）', () => {
+    // 反向锁定：`Verilog` 是真正的技术名（硬件描述语言），必须在 error 级；
+    // 若被一并收进通用词表，"新增 Verilog 技能"就会被放过。
+    for (const tech of ['Verilog', 'MATLAB', 'STM32', 'Redis', 'Kubernetes', 'Python', 'Docker']) {
+      const report = verifyRewrite({
+        original: '- 熟悉 C++；',
+        rewritten: `- 熟悉 C++；\n- 熟悉 ${tech}；`,
+      })
+      assert.equal(report.ok, false, `新增技术名「${tech}」必须仍被拦下`)
+    }
+  })
+
+  test('补充的技术细节（型号/版本/百分位）仍按事实主张拦下', () => {
+    // 这些不是"等价写法"，而是**新增的事实信息**，必须拦：
+    //   STM32 → STM32F103（换了芯片型号）
+    //   Python → Python 3.x（加了版本）
+    //   546 分 → 546 分（前 12%）（加了排名主张）
+    for (const [original, rewritten] of [
+      ['- 使用 STM32 开发控制模块；', '- 使用 STM32F103 开发控制模块；'],
+      ['- 熟悉 Python 与 MATLAB；', '- 熟悉 Python 3.x 与 MATLAB R2023b；'],
+      ['- CET-6 546 分；', '- CET-6 546 分（前 12%）；'],
+    ]) {
+      const report = verifyRewrite({ original, rewritten })
+      assert.equal(report.ok, false, `新增技术细节必须拦下：${rewritten}`)
+    }
+  })
+
   test('正文里的说明性文字降为 warn（不含事实主张，不阻断交付）', () => {
     // 落款、章节导语这类新增文字不含数字/机构/技术名/职责主张，
     // 判 error 只会让用户拿不到文件。降为 warn：提示但不阻断。
