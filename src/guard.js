@@ -1331,7 +1331,19 @@ export function detectSelfAttestation(original, rewritten) {
   if (flatRewritten.length < 8) return { selfAttested: false, reason: '' }
   if (!flatOriginal.includes(flatRewritten)) return { selfAttested: false, reason: '' }
   const extra = flatOriginal.length - flatRewritten.length
-  const tolerance = Math.max(20, Math.floor(flatRewritten.length * 0.1))
+  // 装饰文字的容忍量**必须按语言缩放**（英文实测抓出的不对称）。
+  //
+  // 同一句装饰（"以上为我的原始简历内容" vs "Above is my original resume"）
+  // 在扁平化后长度差很大：中文 12 字、英文 26 字符。
+  // 固定下限 20 于是让**中文命中 contains、英文漏掉**：
+  //   `original = resume + 一行装饰` 这种 S1-3 原始绕过，
+  //   中文能识别，英文却返回 false → 调用方会把 verified 置 true。
+  // 英文单词更长、且 markdown 记号（`#`/`*`）更多，故按"字符数"给阈值
+  // 必然偏向中文。现改为**按语言取不同下限**：英文用 40（约两倍），
+  // 并保留 10% 的比例档（长文本按比例放宽）。
+  const hasHan = /[\u4e00-\u9fa5]/.test(flatRewritten)
+  const floor = hasHan ? 20 : 40
+  const tolerance = Math.max(floor, Math.floor(flatRewritten.length * 0.1))
   if (extra > tolerance) return { selfAttested: false, reason: '' }
   return { selfAttested: true, reason: 'contains' }
 }

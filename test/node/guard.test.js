@@ -2389,6 +2389,33 @@ describe('守卫：自证清白判定（S1-3，交付关依赖它）', () => {
     assert.equal(r.selfAttested, false, '正常改写不是自证清白')
   })
 
+  test('英文简历的自证清白判定必须与中文一致（容忍量需按语言缩放）', () => {
+    // 【实测抓出的不对称】同一句装饰扁平化后长度差很大
+    //（中文 12 字 vs 英文 26 字符），而容忍量下限是固定的 20，
+    // 于是**中文命中 contains、英文漏掉**：
+    //   `original = resume + 一行装饰` 这个 S1-3 原始绕过，
+    //   中文能识别、英文返回 false → 调用方把 verified 置 true。
+    // 现按语言取不同下限（英文 40）。这条用例锁定两侧一致。
+    const enResume = '- Built pages with Vue2;\n- Led user growth strategy doubling MAU;'
+    for (const [label, original] of [
+      ['装饰在后', `${enResume}\nAbove is my original resume`],
+      ['装饰在前', `Note: my resume below\n${enResume}`],
+    ]) {
+      const r = detectSelfAttestation(original, enResume)
+      assert.equal(r.selfAttested, true, `英文「${label}」是自证清白，必须识别`)
+      assert.equal(r.reason, 'contains')
+    }
+    // 反向：英文真实改写不得判为副本
+    assert.equal(
+      detectSelfAttestation(
+        '- Participated in database optimization work;\n- Collaborated with 5 engineers;',
+        '- Led database optimization efforts and coordinated a team of five.',
+      ).selfAttested,
+      false,
+      '英文正常改写不是自证清白',
+    )
+  })
+
   test('模型精简掉整段经历（原文比结果长得多）→ 不得判为自证清白', () => {
     // 边界：original 逐字包含 resume，但多出的是一整段被删掉的经历，
     // 属合法压缩，不能拦——否则用户又拿不到文件。
