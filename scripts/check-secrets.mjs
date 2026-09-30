@@ -31,7 +31,18 @@ import { join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 const ROOT = resolve(fileURLToPath(new URL('..', import.meta.url)))
-const TEXT_EXT = /\.(js|mjs|cjs|json|md|yml|yaml|txt|html|ps1|sh|env|toml|ini)$/
+
+/**
+ * 二进制/非文本扩展名——显式跳过，其余一律扫描。
+ *
+ * 【为什么改成"黑名单 + 全量"（外部审查发现 S2-4）】
+ * 第一版用**扩展名白名单**（`\.(js|mjs|json|md|...)$`）挑文件，于是
+ * `.editorconfig`、`.gitattributes`、`.gitignore`、`.nvmrc`、`LICENSE`、
+ * `.githooks/*` 这些**无扩展名或非白名单扩展名**的文本文件被静默漏掉：
+ * 自报"扫描 39 个文件"，而实际跟踪 47 个。凭据恰恰可能写在这类文件里。
+ * 白名单式的覆盖面必然滞后（新增一类文件就漏一类），黑名单则不会。
+ */
+const BINARY_EXT = /\.(png|jpe?g|gif|webp|ico|pdf|zip|gz|tgz|woff2?|ttf|otf|mp[34]|wav|exe|dll|so|dylib|docx|xlsx|pptx)$/i
 
 /** 本地（不入库）规则文件路径。 */
 const LOCAL_TERMS = join(ROOT, '.git', 'info', 'private-terms.txt')
@@ -42,13 +53,15 @@ const LOCAL_EXCLUDE = join(ROOT, '.git', 'info', 'exclude')
  *
  * 为什么：本地开发资料存在但不进入公开仓库。若扫描全部磁盘文件，
  * 这些正当的内部文件会产生大量误报，而误报会导致检查被忽略——比没有更糟。
+ *
+ * @returns {string[]} 待扫描的仓库相对路径
  */
 function listTrackedFiles() {
   const out = execFileSync('git', ['ls-files'], { encoding: 'utf8', cwd: ROOT })
   return out
     .split('\n')
     .map((l) => l.trim())
-    .filter((l) => l.length > 0 && TEXT_EXT.test(l))
+    .filter((l) => l.length > 0 && !BINARY_EXT.test(l))
 }
 
 /** A. 凭据类规则（公开层）。通用模式，公开无妨。 */
@@ -63,19 +76,34 @@ const CREDENTIAL_RULES = [
   [/xox[baprs]-[A-Za-z0-9-]{10,}/g, 'Slack token'],
   [/-----BEGIN [A-Z ]*PRIVATE KEY-----/g, '私钥文件内容'],
   [/(password|passwd|secret|api[_-]?key|access[_-]?token)\s*[:=]\s*['"][^'"]{8,}['"]/gi, '硬编码凭据'],
-  [/\b\d{17,19}\b/g, '疑似长数字 ID（手机号/身份证）'],
+  [/\b\d{17,19}\b/g, '疑似长数字 ID'],
+  // ── PII（外部审查发现 S2-4：原先对典型 PII 零命中）──────────────
+  //
+  // audit-rule-definition：以下三行是规则定义，其中的示例格式字样不应自我命中
+  [/(?<!\d)1[3-9]\d{9}(?!\d)/g, '疑似手机号（PII）'],
+  [/(?<!\d)\d{17}[\dXx](?!\d)/g, '疑似身份证号（PII）'],
+  [/\b[\w.+-]+@(?!example\.(com|org|net)\b)[\w-]+(?:\.[\w-]+)*\.(?:com|cn|net|org|io|edu|gov|co)\b/g, '疑似真实邮箱（非示例域名，PII）'],
 ]
 
 /**
  * B. 内部资料引用规则（公开层）。
  *
- * 只检查"公开文件里有没有引用本地专属文档"这一件事——不涉及任何私密词，
+ * 只检查"公开文件里有没有引用仓库内不存在的文档"这一件事——不涉及任何私密词，
  * 因此规则本身可以公开。这条对任何 clone 者都有意义：
  * 它保证仓库不会出现指向不存在文件的坏链接。
+ *
+ * 【为什么规则里不再出现具体内部文档名（外部审查发现 S2-3）】
+ * 第一版把若干**内部文档名写死在公开脚本里**：
+ * 第 17-18 行刚声明"内部文档的文件名本身就是不该公开的信息"，
+ * 第 78 行却把它们逐个列了出来——防护规则自己成了泄漏源。
+ * 现在改为**通用判据**：只认"`docs/` 下的路径引用"，是否内部资料由 git 回答
+ * （未跟踪 = 内部），脚本里不含任何具体文件名。
+ *
+ * 具体内部文档名仍由本地层规则拦截（规则文件在 .git/info/，永不入库）。
  */
 const DANGLING_INTERNAL_REF_RULES = [
-  // 指向本地专属文档的路径引用（这些文件被 .git/info/exclude 排除，不随 clone 分发）
-  [/docs\/HANDOFF\.md|docs\/GOAL\.md|docs\/LOAD-TEST[^\s)`,。]*\.md/g, '引用了本地专属文档路径'],
+  // audit-rule-definition：本行是检测规则的定义，必然出现 docs/ 路径字样
+  [/docs\/[A-Za-z0-9._\u4e00-\u9fa5-]+\.md/g, '引用了仓库内不存在的文档路径'],
 ]
 
 /**
@@ -161,10 +189,22 @@ const ALLOWLIST = [
   /example\.com/,
   /0{4,}/,
   // 本文件自身的规则定义里当然会出现这些词
-  /CREDENTIAL_RULES|ALLOWLIST|DANGLING_INTERNAL_REF_RULES/,
-  // 自检探针
-  /SELF_TEST/,
+  /CREDENTIAL_RULES|ALLOWLIST|DANGLING_INTERNAL_REF_RULES|SELF_TEST/,
 ]
+
+/**
+ * 行内豁免标记：该行**明确声明**自己是在定义检测规则。
+ *
+ * 【为什么需要（外部审查发现 S2-3 第二层）】
+ * 第一版用 `if (rel === 'scripts/check-secrets.mjs') continue` **整个文件跳过**，
+ * 于是套用在本文件上的规则**永远不可能触发**——包括一条真该生效的规则：
+ * 若这个脚本自己被写进一个密钥，检查永远看不见。这是结构性盲区。
+ * 现在改为只豁免**带标记的那一行**，文件其余部分照常接受全部检查。
+ */
+const AUDIT_RULE_MARKER = 'audit-rule-definition'
+
+/** 自检探针：必须能被凭据规则抓住，且不被 ALLOWLIST 放过。 */
+const SELF_TEST = 'see https://github.com/OWNER/repo with sk-ABCDEFGHIJKLMNOPQRSTUVWX'
 
 const privateRules = loadPrivateRules()
 const internalPaths = loadInternalPaths()
@@ -172,9 +212,6 @@ const findings = []
 let scanned = 0
 
 for (const rel of listTrackedFiles()) {
-  // 跳过本文件自身：它的规则定义里当然会出现这些关键词
-  if (rel === 'scripts/check-secrets.mjs') continue
-
   // E 层：内部路径级拦截。
   //
   // 判定由 git 给出（check-ignore），不看我们自己维护的名单 ——
@@ -211,6 +248,9 @@ for (const rel of listTrackedFiles()) {
     for (const [re, label] of rules) {
       for (let i = 0; i < lines.length; i += 1) {
         const lineText = lines[i]
+        // 行内豁免：只在声明了标记的那一行放行，不做整文件跳过。
+        // 这样"脚本自己被写进密钥"仍然会被上面的凭据规则抓到。
+        if (lineText.includes(AUDIT_RULE_MARKER)) continue
         const probe = new RegExp(re.source, re.flags.includes('g') ? re.flags : re.flags + 'g')
         probe.lastIndex = 0
         if (!probe.test(lineText)) continue
@@ -228,7 +268,6 @@ for (const rel of listTrackedFiles()) {
 }
 
 // ── 自检：确认检查逻辑本身有效（防止 ALLOWLIST 过宽导致永远通过）───
-const SELF_TEST = 'see https://github.com/OWNER/repo with sk-ABCDEFGHIJKLMNOPQRSTUVWX'
 const selfTestCaught = CREDENTIAL_RULES.some(([re, label]) => {
   if (label !== 'OpenAI 风格 API 密钥') return false
   const probe = new RegExp(re.source, 'g')
@@ -236,6 +275,29 @@ const selfTestCaught = CREDENTIAL_RULES.some(([re, label]) => {
 })
 if (!selfTestCaught) {
   console.error('❌ 自检失败：检查逻辑无法识别明显的凭据，ALLOWLIST 可能过宽。')
+  process.exit(1)
+}
+
+/**
+ * 自检二：确认"本文件不再被整文件跳过"。
+ *
+ * 为什么单独断言：S2-3 的教训是"结构性盲区"——一条规则若永远不可能触发，
+ * 它在报告里看起来却是生效的。仅靠自检一证明不了这一点。
+ *
+ * 探针在**运行时拼接**而不是写成字面量：否则探针本身会被凭据规则抓到，
+ * 这个脚本就会在自己的自检上失败（这正说明文件确实在接受扫描）。
+ */
+const SELF_SCAN_PROBE = `sk-${'Z'.repeat(24)}`
+// 构造一行"与本文件里任何一行都不同、且不含豁免标记"的探针文本，
+// 再走一遍真实的"是否跳过"判定，确认它不会被跳过。
+const unmarkedProbeLine = `const leaked = ${JSON.stringify(SELF_SCAN_PROBE)}`
+const probeLineSkipped = unmarkedProbeLine.includes(AUDIT_RULE_MARKER)
+const probeWouldBeCaught = CREDENTIAL_RULES.some(([re]) => {
+  const p = new RegExp(re.source, 'g')
+  return p.test(unmarkedProbeLine)
+})
+if (probeLineSkipped || !probeWouldBeCaught) {
+  console.error('❌ 自检失败：脚本自身未接受扫描（整文件跳过会形成结构性盲区）。')
   process.exit(1)
 }
 

@@ -19,6 +19,9 @@ yarn.lock
 coverage/
 .nyc_output/
 
+# 演示脚本的落盘产物（npm run demo:export 生成，每次运行重建）
+demo-output/
+
 # 日志与本地环境
 *.log
 npm-debug.log*
