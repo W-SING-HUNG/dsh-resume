@@ -1391,6 +1391,24 @@ export function detectSelfAttestation(original, rewritten) {
   if (o === r) return { selfAttested: false, reason: '' }
   const flatOriginal = normalizeForSimilarity(o)
   const flatRewritten = normalizeForSimilarity(r)
+  // ── 差异**只在排版层**时不判 contains（端到端抓出的误降级）──────────
+  //
+  // 【问题】`normalizeForSimilarity` 会剥掉 `*`、空白等排版字符。于是
+  // "只加了 markdown 标记"的改写，两侧扁平形式**完全相同**：
+  //     `- Built ... QPS from 800 to 2400;` → 同一行加 `**` 加粗
+  //     → flatOriginal === flatRewritten === `...from800to2400`
+  // 此时 `includes` 成立且 `extra = 0`，于是落进 `contains` 档 →
+  // `verified` 被降级为 `false`，回执写"无法确认 original 是否真的是原文"。
+  //
+  // 但那是**误报**：扁平形式相同 ⇒ 内容一字未增 ⇒ 结构上不可能有编造，
+  // 校验也确确实实跑过了、没发现问题。给用户一句"未视为已通过校验"
+  // 是错的（对本项目最看重的"如实回执"是伤害）。
+  // 且 `contains` 档的语义本是"original 比 resume **多出**少量文字"
+  //（疑似回填改写结果）——这里 original 并不比 resume 多，方向不符。
+  //
+  // 【为什么安全】内容未增 ⇒ 不可能藏编造。真正的 S1-3 绕过
+  //（`original = resume + 一行装饰`）会让扁平形式**不同**，仍会被下面拦住。
+  if (flatOriginal === flatRewritten) return { selfAttested: false, reason: '' }
   // 过短的结果（< 8 字）在任何原文里都可能作为片段出现，
   // 用它判定"副本"必然误报，因此不做这一档判定。
   if (flatRewritten.length < 8) return { selfAttested: false, reason: '' }

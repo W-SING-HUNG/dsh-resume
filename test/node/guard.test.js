@@ -2950,19 +2950,34 @@ describe('守卫：自证清白判定（S1-3，交付关依赖它）', () => {
     assert.equal(detectSelfAttestation(ORIGINAL.replace(/\n/g, '\r\n'), ORIGINAL).selfAttested, true)
   })
 
-  test('纯缩进/排版差异不得硬拒绝（只降级 verified）', () => {
+  test('纯缩进/排版差异不得硬拒绝', () => {
     // 【实测抓出的误拒】`equal` 是**硬拒绝档**，语义是"同一份文本传了两次"。
     // 我一度把它放宽为"仅空白归一化后相同"，于是**纯缩进调整**也被硬拒绝：
     //     `- 熟悉 Java\n- 熟悉 MySQL` → `  - 熟悉 Java\n  - 熟悉 MySQL`
     //   → 判 equal → **拒绝导出**（用户拿不到文件）。
     // 缩进是排版，与"回填改写结果"性质完全不同。
-    // 现 `equal` 只认"统一行尾 + 去首尾空白后逐字相同"，
-    // 缩进差异落到 `contains` 档（只降级 verified，不阻断交付）。
+    //
+    // 现 `equal` 只认"统一行尾 + 去首尾空白后逐字相同"。
+    // 而缩进/加粗这类**纯排版差异**连 contains 都不该命中：
+    // 扁平化后两侧完全相同 ⇒ 内容一字未增 ⇒ 不可能藏编造，
+    // 没有必要谎称"无法确认 original 是否真实"（那会伤害如实回执）。
+    // 故这里断言 reason 为空（既不 equal 也不 contains）。
     const base = '- 熟悉 Java\n- 熟悉 MySQL'
     const indented = '  - 熟悉 Java\n  - 熟悉 MySQL'
     const r = detectSelfAttestation(indented, base)
-    assert.equal(r.selfAttested, true, '缩进版仍是同一份内容')
-    assert.equal(r.reason, 'contains', '缩进属排版差异，不得判 equal 硬拒绝')
+    assert.notEqual(r.reason, 'equal', '缩进属排版差异，不得判 equal 硬拒绝')
+    assert.equal(r.reason, '', '纯排版差异无需降级 verified（内容一字未增）')
+  })
+
+  test('纯加粗差异同样不降级 verified（端到端抓出）', () => {
+    // 【端到端暴露】只加 markdown 标记时，扁平化（剥掉 `*`）后两侧完全相同，
+    // 曾误落进 `contains` 档 → verified 被降级为 false，回执谎称
+    // "传入的 original 与 resume 高度重合，无法确认…"。但内容一字未增。
+    const base = '- 使用 Vue2 完成主要展示页面与商品列表模块的开发；'
+    const bold = '- 使用 **Vue2** 完成主要展示页面与商品列表模块的开发；'
+    assert.equal(detectSelfAttestation(base, bold).reason, '')
+    // 反向（安全侧）：真正的 S1-3 绕过仍必须命中 contains
+    assert.equal(detectSelfAttestation(`${base}\n以上为我的原始简历内容`, base).reason, 'contains')
   })
 
   test('副本 + 一行装饰性文字 → 命中 contains 档（这是 S1-3 的原始绕过）', () => {
