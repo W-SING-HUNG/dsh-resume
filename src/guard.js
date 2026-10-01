@@ -47,12 +47,25 @@ export const GUARD_LIMITATIONS = [
   '容量单位的大小写变化（`2MB` ↔ `2Mb`）报"建议检查"：`b` 与 `B` 分别是比特与字节、相差 8 倍，而 `KB/kb`、`MB/mb` 是同一含义的常见混写——纯文本无法判定作者本意，故只提示不阻断。',
   '**新增技能按结构判据分级**：处于括号/斜杠注记位的英文（`超文本传输协议（HTTP）`）与"中文换缩写"的收缩写法（`熟悉超文本传输协议；` → `熟悉 HTTP；`）判"建议检查"；而"原文有一条中文显著更多的句子**仍原封不动地保留着**、本行却多出原文全篇都没有的技术名"判"必须修正"（即凭空多加一项技能）。**代价**：在原文句保留的前提下**另起一行**只写缩写（`- 熟悉 HTTP；`）也会被判"必须修正"——因为该写法与编造技能（`- 熟悉 Redis；`）在文本上无法区分。此时请把缩写并入原句（`- 熟悉超文本传输协议（HTTP）…`），那是被放行的。',
   '**多词英文注记只认"全大写缩写 + 其展开"**：`JVM（Java Virtual Machine）`、`GPA（Grade Point Average）`、`HTTP（HyperText Transfer Protocol）` 会被放行（判"建议检查"）——它们只是把**已有缩写**写成全称，没有新增技能主张。而 `Java（Just Another Vague Abbreviation）`、`数据库（Redis Cluster）` 会被拦：前者括号前是**普通单词而非缩写**（`Java` 带小写字母），后者括号内是**原文没有的技能**。括号前是**中文**时（`超文本传输协议（HyperText Transfer Protocol）`、`## 专业技能（Skills）`）同样放行——中文术语并列英文是 ATS 常规动作，无法也不必做首字母校验。',
+  '**英文侧反向形态「全称 + 其缩写」同样放行**（`Google Analytics (GA)`、`Google Analytics（GA）`、`Google Analytics / GA`，以及**缩写在前**的 `GA (Google Analytics)`）——中文简历用 `中文术语（HTTP）`，英文简历没有中文可并列，只能写作全称与缩写直接相邻，属同一 ATS 对齐动作。放行条件是**该全称短语必须在原文中逐词存在**，故不构成编造通道：`Fake Skill (FS)`、`FS (Fake Skill)`（全称是编造的）、`Google Analytics (Tableau)`、`Tableau (Google Analytics)`（缩写对应别的技术）、`Google Analytics (GA), Tableau`（借形态追加新技术）**均仍被拦**；**另起一行**只写缩写（`- Familiar with GA`）也仍按"新增技能"处理（与编造 `- 熟悉 Redis；` 文本上无法区分），请把缩写并入原句。',
   '**英文简历的"缩写 ⇄ 全称"识别三类形态**：① **逐词首字母**：`JVM ⇄ Java Virtual Machine`、`SQL ⇄ Structured Query Language`；② **词内大写**：`HTTP ⇄ HyperText Transfer Protocol`（HyperText 贡献 H 与 T）；③ **数字式**：`K8s ⇄ Kubernetes`、`i18n ⇄ internationalization`（首字母 + 中间字母数 + 尾字母，判据可验证）。三者都报"建议检查"而不阻断。**唯一覆盖不到、会判"必须修正"（已知边界）**：**词内取字母型**如 `REST` = **R**epresentational State Transfer（`E` 取自词内而非任何词首）——它与"普通单词恰好首字母拼成同一串"（如 `Java` → `JAVA`）在纯文本上无法区分，放宽会放过 `Java → Java Virtual Machine`（那确实新增了 JVM 主张）。遇到这类时，请保留缩写写法本身（`Built REST APIs` 原样不动），不要改写成全称。',
   '本校验只做文本特征比对，不判断内容是否真实。它拦得住"与原文对不上"的编造，拦不住"原文本身就写了假的"。',
 ]
 
 /** 守卫版本。判定规则变化时递增，便于回溯误报/漏报。 */
-// 1.2.0：本轮判定规则发生多处实质变更，必须递增以便回溯——
+// 1.3.0：本版含两类实质变更，均来自"新增语料 + 独立对抗审查"的实测。
+//   【一】修一处**误报**（用户拿不到文件）：英文简历做 ATS 对齐
+//     （`Google Analytics (GA)`，含缩写在前形态）被判"新增技能"而拒绝导出，
+//     与 S1-1（`CSS → SCSS` 误拒）同类。新增规则 ①-c，要求全称短语
+//     在原文中逐词存在，故未开出编造通道。
+//   【二】修六类**静默放行**（编造却 ok=true、findings=[]，最严重的一类）：
+//     · 全角拉丁技术名（`Ｒｅｄｉｓ`）：normalizeText 统一全角数字+字母→半角
+//     · 原文无日期时凭空新增日期：去掉日期检查的"原文有日期"前提
+//     · 与日期同值的编造数量：改按位置遮蔽日期片段，并用汉语量词区分"年份/数量"
+//     · 学历机构换名（`职业学校`→`某某中学`）：补齐机构后缀表
+//     · 符号型技术名（`C++`/`C#`/`.NET`）：新增 isSymbolTechName 判据
+//     · 裸单字母语言名（`C`/`R`）：降为 warn（单字母歧义大，但不得静默）
+// 1.2.0：判定规则发生多处实质变更，必须递增以便回溯——
 //   · 专名识别：按"是否含汉字"分流（原来只认首字母大写 → 真实中文简历上近乎空转）
 //   · 实体比对：token 边界精确匹配（原来用裸子串 → 截断换名漏报）
 //   · 编造实体：改结构性判据（原来靠枚举名单 → 20 个 ATS 动作被误拒 13 个）
@@ -61,7 +74,7 @@ export const GUARD_LIMITATIONS = [
 //   · 容量单位大小写：新增 UNIT_CASE_CHANGED（原来完全静默）
 //   · 职责升格：下推到内容单元级（原来按全文 min/max，双向都错）
 //   · 自证清白：拆为 equal/contains 两档并分别处理（原来会误伤合法改写）
-export const GUARD_VERSION = '1.2.0'
+export const GUARD_VERSION = '1.3.0'
 
 /**
  * 中文机构名后缀。用于识别"改写后新出现的机构"。
@@ -83,6 +96,22 @@ const ZH_ORG_SUFFIXES = [
   '出版社',
   '传媒',
   '工作室',
+  // ── 学历机构（实测抓出的列举缺口）────────────────────────────────
+  //
+  // 【为什么必须补（本轮独立审查抓出的静默放行）】
+  // 原表有 大学/学院，但没有中小学——于是**换学校**这类最典型的编造
+  // 在文本上完全无痕：
+  //   `- 在某职业学校完成计算机课程学习；` → `- 在某某中学完成…；`
+  //   → `ok=true`、`findings=[]`（该句无数字、无拉丁专名、无职责动词）
+  // 这不是"无后缀机构"那条**已声明**的边界（`中学` 是**带后缀**的机构），
+  // 而是列举缺口，故补齐；`GUARD_LIMITATIONS` 第 1 条据此仍然成立。
+  '中学',
+  '小学',
+  '高中',
+  '初中',
+  '学校',
+  '职业技术学院',
+  '培训中心',
 ]
 
 /**
@@ -810,17 +839,49 @@ const AMBIGUOUS_SHORT_ACRONYMS = new Set(
 )
 
 /**
+ * 该 token 是否是**符号型技术名**（`C++`、`C#`、`F#`、`.NET`）。
+ *
+ * 【为什么单列（本轮独立审查抓出的静默放行）】
+ * `isLatinIdentifierCandidate` 要求"以字母开头且 ≥2 个字母、不含非字母数字"，
+ * 于是 `C++` / `C#` / `F#`（含符号、只有 1 个字母）与 `.NET`（前导点）
+ * 被**两个严重级同时排除**——既不在 error 候选集、也不在 warn 候选集，
+ * 完全不可见：
+ *   `- 熟悉 Java 与 Python 开发；` → `- 熟悉 Java、C++ 与 Python 开发；`
+ *   → `ok=true`、`findings=[]`，**凭空新增一项技能**。
+ * 而 `GUARD_LIMITATIONS` 明确承诺"用连接词并进列表（`使用 Vue2 与 Kotlin`）"
+ * 属"必须修正"，故 `C++` 漏过与该声明矛盾。
+ *
+ * 【为什么可以判 error 级（不会误报）】
+ * 普通英文散文词里**不可能**出现 `+`/`#` 或前导点——
+ * 这些形态只出现在技术名/标记里，故不存在"等价写法被误拦"的风险。
+ * 注意**刻意不含 `/`**：`CI/CD`、`TCP/IP` 是已知的等价记号，保持降级为 warn。
+ *
+ * @param {string} w 已剥离尾部标点的 token
+ * @returns {boolean} 是否符号型技术名
+ */
+function isSymbolTechName(w) {
+  // 含 `+`/`#` 且有字母：`C++`、`C#`、`F#`、`Objective-C++`
+  if (/[+#]/.test(w) && /[A-Za-z]/.test(w)) return true
+  // 前导点 + 字母：`.NET`、`.NET Core`
+  if (/^\.[A-Za-z]/.test(w)) return true
+  return false
+}
+
+/**
  * 该拉丁 token 是否值得当作"疑似专名"参与新增比对（**error 级**）。
  * @param {string} w 已剥离尾部标点的 token
  * @returns {boolean} 是否保留
  */
 function isLatinIdentifierCandidate(w) {
+  // 符号型技术名优先判定：`C++` 只有 1 个字母、`.NET` 不以字母开头，
+  // 都会在下面的常规判据里被误排除（见 isSymbolTechName 的说明）。
+  if (isSymbolTechName(w)) return true
   // 必须以字母开头，且至少含 2 个字母。
   //
   // 为什么不是"含字母即可"（实测噪声）：中文简历里 `2.4s`、`1.8s`
   // 这类"数字 + 单位"的 token 也含字母，若一并收进来，
   // 合法的单位换算（`2.4s` → `2400ms`）会触发 FABRICATED_ENTITY 误报。
-  // 而要求"以字母开头"只损失 `C++` 这类单词缩写，代价可接受。
+  // 要求"以字母开头"只损失裸单字母，代价可接受（符号型已在上方单独放行）。
   if (!/^[A-Za-z]/.test(w)) return false
   if ((w.match(/[A-Za-z]/g) ?? []).length < 2) return false
   // 记号型 token（`CI/CD`、`TCP/IP`、`A/B`）不进 error 级：
@@ -854,6 +915,21 @@ function isLatinIdentifierCandidate(w) {
  * @returns {boolean} 是否作为 warn 级提示
  */
 function isAmbiguousLatinToken(w) {
+  // 符号型技术名已是 error 级，不重复提示
+  if (isSymbolTechName(w)) return false
+  // ── 裸单字母语言名（`C`、`R`、`S`）→ **warn 级**（本轮独立审查抓出的静默）──
+  //
+  // 【为什么单列】`C`/`R` 是真实存在的编程语言名，但只有 1 个字母，
+  // 被 `≥2 个字母` 的判据同时挡在 error 与 warn 两级之外 ——
+  // `- 熟悉 Java、C 与 Python 开发；` → `ok=true`、`findings=[]`，
+  // 凭空新增一项技能**完全静默**。
+  //
+  // 【为什么不判 error】单字母在文本里高度歧义：可能是姓名缩写、
+  // 章节编号、英文代词 `I`、冠词 `A`。判 error 会制造误报并阻断交付
+  //（本项目最忌），故按"歧义标识符"处理：**只提示、不阻断**，
+  // 这样至少做到"不静默"（严重度排序：静默放行 > 误报 > 漏报有告警）。
+  // 排除 `I`/`A`：英文简历的代词与冠词，收进来只会制造噪声。
+  if (/^[A-Z]$/.test(w) && !/^[IA]$/.test(w)) return true
   if (!/^[A-Za-z]/.test(w)) return false
   if ((w.match(/[A-Za-z]/g) ?? []).length < 2) return false
   // 已是 error 级的就不再重复提示
@@ -883,6 +959,97 @@ export function extractAmbiguousLatinTokens(text) {
   return out
 }
 
+/** 英文月份名/缩写 → 月份数字（插件支持 language: 'en'）。 */
+const MONTHS_EN = /** @type {Record<string, number>} */ ({
+  jan: 1, january: 1, feb: 2, february: 2, mar: 3, march: 3,
+  apr: 4, april: 4, may: 5, jun: 6, june: 6, jul: 7, july: 7,
+  aug: 8, august: 8, sep: 9, sept: 9, september: 9, oct: 10, october: 10,
+  nov: 11, november: 11, dec: 12, december: 12,
+})
+
+/** 中文数字 → 阿拉伯数字（仅用于"四字年份 + 年"这一形态）。 */
+const ZH_DIGITS = /** @type {Record<string, string>} */ ({
+  〇: '0', 零: '0', 一: '1', 二: '2', 三: '3', 四: '4',
+  五: '5', 六: '6', 七: '7', 八: '8', 九: '9',
+})
+
+/**
+ * 汉语**量词**（数量短语的右界），用于区分"年份"与"数量"。
+ *
+ * 【存在理由（本轮实测抓出的静默放行）】
+ * `服务 2022 名用户` 里的 `2022` 是**数量**，但四位数字的形态与年份相同，
+ * 于是日期检查会把它登记成一个"时间点"，数字检查再按"与日期同值"把它剔除——
+ * 结果**编造的数量完全静默**（`ok=true`、`findings=[]`）。
+ * 判据：四位数字**紧跟量词**时是数量，不是年份。
+ *
+ * 【为什么不违反"不靠枚举"的项目原则】
+ * 本项目反对的是枚举**开放集合**（"中文术语 ↔ 英文缩写"），那种枚举必然滞后。
+ * 而汉语量词是**封闭的词法类别**（语法虚词，数量有限且稳定），
+ * 不存在"新造量词"的问题，故按量词排除是可靠的结构判据。
+ *
+ * ⚠️ **刻意不含 `年`/`月`/`日`/`届`**：那些恰恰是**日期**标记
+ * （`2022年`、`2022届`），把它们当作量词会让真正的日期漏检。
+ */
+const ZH_MEASURE_WORDS =
+  '名|个|项|人|次|万|条|份|页|台|款|套|篇|张|笔|家|所|门|种|类|元|块|户|例|场|轮|版|期|组|批|宗|单|桩|起'
+
+/**
+ * 判断某位置的四位数字是否是**数量**（而非年份）——即其后紧跟量词或拉丁字母/百分号。
+ *
+ * 两个方向都必须排除，否则会分别造成漏检与误报：
+ *   · `服务 2022 名用户` → 数量，**不得**当日期（否则数字被剔除 → 静默放行）
+ *   · `2000KB`            → 数量，**不得**当日期（否则数值改动被静默）
+ *   · `2022年入职`        → 日期（`年` 不在量词表内）
+ *
+ * @param {string} text 待判断文本
+ * @param {number} end 四位数字结束处的下标
+ * @returns {boolean} 是否为数量
+ */
+function looksLikeQuantity(text, end) {
+  return new RegExp(`^\\s*(?:[A-Za-z%]|${ZH_MEASURE_WORDS})`).test(text.slice(end)) ||
+    // 紧邻数字/小数（`2022.5`、`20225`）也不是年份——那种形态由数字规则处理
+    /^[\d.]/.test(text.slice(end))
+}
+
+/** 与 {@link looksLikeQuantity} 配套的正则片段，供 `replace` 的否定预查使用。 */
+const QUANTITY_LOOKAHEAD = `(?!\\s*(?:[A-Za-z%]|${ZH_MEASURE_WORDS})|\\s*[\\d.])`
+
+/**
+ * 把年份的**缩写写法**补成全四位，使两种写法在比对时等价。
+ *
+ * 形态（都要求紧跟 `年`，故不会误伤一般中文数字）：
+ *   - 两位数字：`22年` → `2022年`
+ *   - 中文数字：`二〇二二年` → `2022年`
+ *
+ * 【为什么必须存在（本轮"日期检查去掉前提"的配套，缺一即产生误报）】
+ * 第 4 项日期检查原先以 `originalDates.size > 0` 为前提，故 `22年入职`
+ * 从未被识别；一旦去掉前提，`22年` → `2022年` 这种**纯写法补全**
+ * 就会被判成"新增时间点"并**拒绝导出**——那是拿一个误报换一个静默放行。
+ * 正解是把解析器补全，而不是把检查放回去。
+ *
+ * 【为什么用固定 pivot 而不是 `new Date()`】
+ * 本模块必须保持**纯函数、可离线复现**（测试与示例都依赖它）。
+ * 简历的时间跨度大致在 1950–2035，故 `50`–`99` 归 19xx、`00`–`49` 归 20xx。
+ *
+ * 【为什么要求"后面紧跟 年"】
+ * 裸两位数（`22`）是量化数据（`22 个模块`），不属于日期；
+ * 只有 `22年` 这种带年份上下文的写法才能安全归一化。
+ *
+ * @param {string} text 待归一化文本
+ * @returns {string} 年份缩写已展开的文本
+ */
+function expandYearAbbreviations(text) {
+  // `(?<!\d)` 必须有：否则 `2022年` 会从**位置 2** 匹配到 `22年`，
+  // 补成 `202022年`，反而把四位年份破坏掉（实测踩到）。
+  return text.replace(
+    /(?<!\d)(?:([〇零一二三四五六七八九]{4})|(\d{2}))\s*年/g,
+    (_full, zh, yy) =>
+      zh === undefined
+        ? `${Number(yy) >= 50 ? '19' : '20'}${yy}年`
+        : `${[...zh].map((c) => ZH_DIGITS[c] ?? '').join('')}年`,
+  )
+}
+
 /**
  * 提取时间点 token（年份、年月）。
  *
@@ -893,6 +1060,7 @@ export function extractAmbiguousLatinTokens(text) {
  * 提取形态：
  *   - 四位年份：2019、2024
  *   - 年月：2019.06、2019-06、2019年6月
+ *   - **缩写年份**：22年、二〇二二年（先补全为四位）
  *   - **英文年月**：Sep 2022、September 2022、2022 Sep（插件支持 language: 'en'）
  *
  * @param {string} text 待提取文本
@@ -918,13 +1086,7 @@ export function extractDateTokens(text) {
   // `(?!\d)` 用来堵回溯：`2019-2021` 里 `20` 因 >12 失败后，
   // 正则会退而匹配单个 `2`——那会得到 `2019-02`，同样错误。
   const consumed = []
-  /** 英文月份名/缩写 → 月份数字（插件支持 language: 'en'） */
-  const MONTHS_EN = /** @type {Record<string, number>} */ ({
-    jan: 1, january: 1, feb: 2, february: 2, mar: 3, march: 3,
-    apr: 4, april: 4, may: 5, jun: 6, june: 6, jul: 7, july: 7,
-    aug: 8, august: 8, sep: 9, sept: 9, september: 9, oct: 10, october: 10,
-    nov: 11, november: 11, dec: 12, december: 12,
-  })
+  let masked = expandYearAbbreviations(src)
   const ymPatterns = [
     /((?:19|20)\d{2})\s*[年.\-/]\s*(0?[1-9]|1[0-2])(?!\d)\s*月?/g,
     // 英文年月：`Sep 2022` / `September 2022`（月份在前）
@@ -932,7 +1094,6 @@ export function extractDateTokens(text) {
     // 英文年月：`2022 Sep` / `2022 September`（年份在前）
     /\b((?:19|20)\d{2})\s+([A-Za-z]{3,9})\.?\b/g,
   ]
-  let masked = src
   for (const re of ymPatterns) {
     for (const m of masked.matchAll(re)) {
       // 三种形态统一处理，**按"哪个 capture 是数字月份"分流**，不按顺序猜：
@@ -963,12 +1124,19 @@ export function extractDateTokens(text) {
     }
   }
   // 把已消费的年月片段替换掉，避免裸年份规则再抓一次
+  // （缺了这一步，`2022年9月` 会同时产出 `2022-09` 与裸 `2022`，
+  //  使日期检查的年份/月份细分逻辑基于错误的集合判断 —— 实测抓出）
   for (const frag of consumed) {
     masked = masked.replace(frag, ' ')
   }
 
   // 裸年份（合理范围，避免把金额/百分比误当年份）
-  for (const m of masked.matchAll(/\b(19|20)\d{2}\b/g)) {
+  //
+  // 【⚠️ 必须排除"紧跟量词/字母/小数"的形态（本轮实测抓出的静默放行）】
+  // `服务 2022 名用户` 里的 `2022` 是**数量**。若把它登记为时间点，
+  // 数字检查又会按"与日期同值"把它剔除 → 编造的数量完全静默。
+  // `2000KB` 同理（会导致数值改动被静默）。
+  for (const m of masked.matchAll(new RegExp(`\\b(19|20)\\d{2}\\b${QUANTITY_LOOKAHEAD}`, 'g'))) {
     out.add(m[0])
   }
   return out
@@ -1730,6 +1898,26 @@ export function normalizeText(input) {
   return (
     input
       .replace(/\r\n?/g, '\n')
+      // ── 全角拉丁字母/数字 → 半角（实测抓出的**双向**缺陷）──────────────
+      //
+      // 【为什么必须归一化（英文技术名侧的静默放行）】
+      // 中文输入法下 `Redis` 极易写成 `Ｒｅｄｉｓ`。此前只归一化**全角数字**
+      // （见 extractNumericTokens），全角**字母**无人处理，于是：
+      //   `- 熟悉 Java 与 MySQL；` → `- 熟悉 Java、Ｒｅｄｉｓ 与 MySQL；`
+      //   → `Ｒｅｄｉｓ` 不是 ASCII `[A-Za-z]`，连"warn 候选"都进不去
+      //   → `ok=true`、`findings=[]`，**静默放行**（本项目最严重的一类）。
+      //
+      // 【同一根因的反方向：误拒（用户拿不到文件）】
+      //   `- 熟悉 Ｊａｖａ 与 ＭｙＳＱＬ 的使用；` → `- 熟悉 Java 与 MySQL 的使用；`
+      //   是**纯写法规整**（一字未增），却因两侧 token 形态不同被判
+      //   `FABRICATED_ENTITY` + `NOVEL_CONTENT` → **拒绝导出**。
+      // 两个方向都由这一处归一化同时修好——与全角数字用的是同一个道理。
+      //
+      // 只动**数字与拉丁字母**区间（FF10-FF19 / FF21-FF3A / FF41-FF5A），
+      // 不碰全角标点：标点已由各下游正则单独处理，扩大范围只会引入无谓风险。
+      .replace(/[\uFF10-\uFF19\uFF21-\uFF3A\uFF41-\uFF5A]/g, (c) =>
+        String.fromCharCode(c.charCodeAt(0) - 0xfee0),
+      )
       // ── 剥离 markdown **有序列表序号**（实测抓出的死锁）──────────────
       //
       // 【为什么（真实简历实测）】把无序列表改成有序列表是最常见的排版动作：
@@ -1853,7 +2041,18 @@ export function extractNumericTokens(text) {
   const src = normalizeText(text)
   if (src === '') return out
   // 全角数字先转半角，否则 '４０%' 这类会被漏掉
-  const normalized = src.replace(/[０-９]/g, (c) => String(FULLWIDTH_DIGITS.indexOf(c)))
+  //
+  // 【日期片段必须在这里就**按位置**遮蔽掉（本轮实测抓出的静默放行）】
+  // 日期成分原先靠 `subtractDateTokens` 按**值**剔除，会连带删掉与日期
+  // 同值的真实数字：`2022.06 … 实习 6 个月` 里的 `6` 被当成"月份 06"删掉，
+  // 编造的数字因此完全静默。按位置遮蔽后，日期看不见、真实数字照常比对。
+  const normalized = maskDateFragments(
+    src.replace(/[０-９]/g, (c) => String(FULLWIDTH_DIGITS.indexOf(c))),
+  )
+  // 【⚠️ 年份缩写必须与 `extractDateTokens` 用**同一套**归一化（实测抓出的不对称）】
+  // 两边若不一致，`22年` → `2022年` 这类纯写法补全会被判成
+  // "多出数字 2022 / 丢掉数字 22"，即**一个误报换一个误报**。
+  // `maskDateFragments` 内部已做同名展开，两处走的是同一个函数。
 
   // ── 先抽取"联系方式数字"（手机/座机），整体归一化后再参与比对 ──
   //
@@ -1966,6 +2165,51 @@ export function extractNumericTokens(text) {
 }
 
 /**
+ * 把文本中的**日期片段**整体遮蔽掉，返回遮蔽后的文本。
+ *
+ * 【存在理由（本轮实测抓出的静默放行）】
+ * 数字检查原本靠 {@link subtractDateTokens} 从**值集合**里剔除日期成分，
+ * 但那是"按值剔除"，会连带删掉**与日期同值的真实数字**：
+ *   `- 2022.06 在某互联网公司实习；`
+ *   → `- 2022.06 在某互联网公司实习 6 个月；`
+ *   `6` 与日期里的月份 `06` 同值 → 被判为"日期成分"删掉
+ *   → `ok=true`、`findings=[]`，**编造的数字完全静默**。
+ * 同理年份：`…服务 2022 名用户`、`…完成 06 项任务` 都会被吃掉。
+ *
+ * 正解是**按位置剔除**而不是按值剔除：先把日期片段从文本里挖掉，
+ * 数字检查就永远看不到它们，而同值的真实数字仍在文中、照常参与比对。
+ *
+ * @param {string} text 已归一化（含年份缩写展开）的文本
+ * @returns {string} 日期片段已替换为空格占位的文本
+ */
+function maskDateFragments(text) {
+  let masked = expandYearAbbreviations(text)
+  // 日期片段的两种形态（与 extractDateTokens 的 ymPatterns 同源）：
+  //   · 数字年月：`2022.06`、`2022-06`、`2022年6月`
+  //   · 英文年月：`Sep 2022`、`2022 Sep`
+  //
+  // ⚠️ 必须连**月份以外的部分**一起遮蔽（整段替换），否则裸年份规则
+  //    仍会从 `2022.06` 里抓到 `2022`，月份细分逻辑又基于错误集合判断。
+  const fragments = [
+    /(?:19|20)\d{2}\s*[年.\-/]\s*(?:0?[1-9]|1[0-2])(?!\d)\s*月?/g,
+    /\b[A-Za-z]{3,9}\.?\s+(?:19|20)\d{2}\b/g,
+    /\b(?:19|20)\d{2}\s+[A-Za-z]{3,9}\.?\b/g,
+    // 裸年份：只认"带年份上下文"的写法，**不得啃掉数值+量词/单位**。
+    //
+    // 【为什么必须有这些否定预查（实测抓出的三处回归，方向相反）】
+    // ① 第一版写成 `(?<!\d)(?:19|20)\d{2}(?!\d)`，于是 `2000KB` 里的 `2000`
+    //    被遮蔽 → `2MB` 改成 `2000KB`（数值真的变了）时**两侧数字集都为空**，
+    //    编造的数值改动变成静默放行（一条既有测试直接打红）。
+    // ② 收紧字母/小数后，`服务 2022 名用户` 里的 `2022` 仍被当成年份遮蔽，
+    //    于是**编造的数量**又静默了。
+    // 判据与 {@link looksLikeQuantity} 共用同一份量词表（单一事实来源）。
+    new RegExp(`(?<![\\d.])(?:19|20)\\d{2}${QUANTITY_LOOKAHEAD}`, 'g'),
+  ]
+  for (const re of fragments) masked = masked.replace(re, ' ')
+  return masked
+}
+
+/**
  * 从数字 token 集合中剔除日期成分。
  *
  * 存在理由（实测）：`2019年6月` 改写成 `2019.06` 时，
@@ -1977,8 +2221,18 @@ export function extractNumericTokens(text) {
  * （两个独立 token），而 `2026.03` 抽出的是复合 token `2026.03`——
  * 两者形态不同，于是 `2026.03 → 2026年3月` 这类**纯格式规范化**
  * 会被判成"多出一个数字 3"，合法改写被拒。
- * 因此凡是与某个日期同年/同月的裸数字，一律视为日期成分一并剔除。
- * 这不会放过编造：日期本身由 FABRICATED_DATE 检查负责。
+ *
+ * 【⚠️ 本函数**不再按值剔除"年份/月份分量"**（实测抓出的静默放行）】
+ * 早期它把"与某个日期同年/同月的裸数字"一律删掉。在遮蔽还不存在时，
+ * 那是为了让 `2026.03 → 2026年3月`（两个独立 token）等价；但它是**按值**删的，
+ * 于是会连带删掉**同值的真实数字**——而那是编造最常见的落点：
+ *   · `2022.06 … 实习 6 个月`   → 编造的 `6` 被当"月份 06"删掉
+ *   · `…服务 2022 名用户`        → 编造的 `2022` 被当"年份分量"删掉
+ *   · `…完成 06 项任务`          → 编造的 `06` 被当"月份"删掉
+ * 三者都 **`ok=true`、`findings=[]`**，编造数字完全静默。
+ *
+ * 现改为：日期成分由 {@link maskDateFragments} 在**提取数字之前按位置**遮蔽，
+ * 同值的真实数字因此不再被误删。本函数只兜底"本身就是日期形态"的 token。
  *
  * @param {Set<string>} numbers 数字 token 集合
  * @param {Set<string>} dates 日期 token 集合（形如 `YYYY-MM` 或 `YYYY`）
@@ -1986,25 +2240,15 @@ export function extractNumericTokens(text) {
  */
 export function subtractDateTokens(numbers, dates) {
   const out = new Set()
-  // 日期涉及的年份与月份分量（`2026-03` → 年份 2026、月份 03/3）
-  const dateYears = new Set()
-  const dateMonths = new Set()
-  for (const d of dates) {
-    dateYears.add(d.slice(0, 4))
-    if (d.length === 7) {
-      const month = d.slice(5)
-      dateMonths.add(month)
-      // 月份同时收纳去零形态，覆盖 `3` 与 `03` 两种写法
-      dateMonths.add(String(Number(month)))
-    }
-  }
   for (const n of numbers) {
-    // 复合日期 token（2019.06 / 2019.06.01）
+    // 复合日期 token（`2019.06`、`2019.06.01`）——本身就是日期写法，
+    // 不是量化数据，交由日期检查负责，避免同一问题报两条。
     if (/^(19|20)\d{2}\.\d{1,2}(\.\d{1,2})?$/.test(n)) continue
-    // 与已知日期同年的裸年份
-    if (/^(19|20)\d{2}$/.test(n) && dateYears.has(n)) continue
-    // 与已知日期同月的裸月份（`2026年3月` 里的 `3`）
-    if (/^\d{1,2}$/.test(n) && dateMonths.has(n)) continue
+    // 裸年份：仅当它**就是**某个已知日期本身（而非"与日期同年"）时才剔除。
+    // 例如日期集合里有 `2022`，数字里的 `2022` 即同一时间点。
+    // ⚠️ 不能用 `dateYears.has(n)`——那会删掉"与日期同年"的真实数量
+    //    （`服务 2022 名用户`），正是上面说明的静默放行。
+    if (dates.has(n)) continue
     out.add(n)
   }
   return out
@@ -2315,9 +2559,109 @@ export function verifyRewrite({ original, rewritten, claimedKeywords } = {}) {
     return m === null ? -1 : m.index
   }
   /**
-   * 判断实体是否处于"中文术语旁的并列注记位"（`（HTTP）`、`/ CI`）。
+   * 判断 `abbr` 是否处在「**紧跟其前的英文全称**」的注记位（规则 ①-c）。
    *
-   * 这类形态是把中文说法与英文写法并列——ATS 关键词对齐的常规动作。
+   * 与规则 ② 同源、方向相反：② 认「缩写 + 其展开」（`JVM（Java Virtual Machine）`），
+   * 本判据认「全称 + 其缩写」（`Google Analytics (GA)`）。
+   * 中文侧靠规则 ① 放行（括号前是中文术语），英文简历没有中文可并列，
+   * 若不认这一形态，英文简历最常规的 ATS 对齐动作会被**拒绝导出**。
+   *
+   * 【为什么要求"全称短语必须逐词出现在原文里"（否则会开出一条编造通道）】
+   * 只看"首字母拼起来等于缩写"是不够的——`Fake Skill (FS)` 的首字母同样是 `FS`，
+   * 那样反而把**凭空编造的技能**放行了。故必须回到原文核对：
+   * 该全称短语在原文中确实存在，才说明这是"给已有技术名补缩写"，
+   * 而不是新增主张。（这也顺带挡住 `Java` 这类普通词：`Java` 的首字母
+   * 拼写恰好是 `JAVA`，但它不是"全称短语 + 缩写"形态。）
+   *
+   * 【为什么要求"紧邻"且"≥2 个词"】
+   * 紧邻 + 多词才能构成英文里"全称（ABBR）"的书写形态，避免退化成
+   * "任意位置出现一个缩写就放行"。
+   *
+   * @param {string} unit 句子
+   * @param {string} abbr 被判为新词的缩写候选
+   * @returns {boolean} 是否为"英文全称 + 其缩写"的并列注记
+   */
+  const isFullNameAcronymAnnotation = (unit, abbr) => {
+    const short = abbr.replace(/\./g, '')
+    // ① 缩写形态：全大写、≥2 个字符（`GA`、`AWS`、`J.V.M`）
+    if (!/^[A-Z][A-Z0-9]*$/.test(short) || short.length < 2) return false
+    const at = indexOfToken(unit, abbr)
+    if (at < 0) return false
+    /**
+     * 该全称短语是否**逐词出现在原文**中。
+     *
+     * 这是整个判据的安全阀：只看"首字母对得上"不足以证明全称是真的，
+     * 否则 `Fake Skill (FS)` 会被放行（首字母同样是 `FS`）。
+     *
+     * @param {string[]} words 全称短语
+     * @returns {boolean} 原文中是否存在该短语
+     */
+    const fullNameExistsInOriginal = (words) => {
+      const pattern = words
+        .map((w) => w.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'))
+        .join('\\s+')
+      return new RegExp(`(?<![A-Za-z0-9_])${pattern}(?![A-Za-z0-9_])`, 'i').test(originalText)
+    }
+    // ①-c-2 **缩写在前、全称在括号里**（`GA (Google Analytics)`）——
+    //   与 ①-c-1 是同一个动作的另一种书写顺序，两种都必须放行。
+    //
+    // 【为什么两种顺序都要管（实测抓出的"半修"）】
+    // 只修 `Google Analytics (GA)` 会让同一件事因书写顺序不同而一放一拦——
+    // 正是本项目反复抓过的那类不一致缺陷。且此处新词是**缩写本身**（`GA`），
+    // 它落在括号**外**，规则 ②（认"括号内的展开"）也接不住它。
+    const after = unit.slice(at + abbr.length)
+    const closeMatch = /^\s*[（(【\[]([^）)】\]]*)[）)】\]]/.exec(after)
+    if (closeMatch !== null) {
+      const innerWords = closeMatch[1].match(/[A-Za-z][A-Za-z0-9-]*/g) ?? []
+      const caps = (innerWords.join(' ').match(/[A-Z]/g) ?? []).join('')
+      if (
+        innerWords.length >= 2 &&
+        caps === short &&
+        fullNameExistsInOriginal(innerWords)
+      ) {
+        return true
+      }
+    }
+    // ①-c-1 **全称在前、缩写在括号/斜杠里**（`Google Analytics (GA)`）。
+    // ② 紧邻左侧必须是括号或斜杠，否则不是"并列注记"
+    const before = unit.slice(Math.max(0, at - 3), at)
+    if (!/[（(【\[/]\s*$/.test(before)) return false
+    // ③ 取括号/斜杠之前的拉丁词，再**从右往左**扩大窗口取候选全称。
+    //
+    // 【为什么是"从右往左的滑动窗口"而不是"一直往左吃"（实测抓到）】
+    // 直接往左吃到行首会把整个技能列表吞进来：
+    //   `Excel, PowerPoint, Google Analytics (GA)`
+    //   → 候选全称变成 4 个词、大写字母串为 `EPGA` ≠ `GA` → 判定失败 → 依然误拒。
+    // 故与规则 ②（`isExpansionOfOriginalAcronym`）同构：窗口必须**贴着括号**
+    // 向右对齐、逐步向左扩展，直到累计大写字母数达到缩写长度为止。
+    // 这样 `Google Analytics (GA)` 恰好取到 `[Google, Analytics]`。
+    const prefix = unit.slice(0, at).replace(/[（(【\[/]\s*$/, '').trimEnd()
+    const words = prefix.match(/[A-Za-z][A-Za-z0-9-]*/g) ?? []
+    /** @type {string[] | null} */
+    let fullName = null
+    for (let s = words.length - 1; s >= 0; s -= 1) {
+      const slice = words.slice(s)
+      // 全称短语的每个词都应以大写字母开头（`Google Analytics`）；
+      // 否则说明窗口已经越过了短语边界（吃进了小写普通词），停止扩展。
+      if (!slice.every((w) => /^[A-Z]/.test(w))) break
+      const caps = (slice.join(' ').match(/[A-Z]/g) ?? []).join('')
+      // 大写字母数超过缩写长度说明窗口过大，且再往左只会更长，停止。
+      if (caps.length > short.length) break
+      if (caps === short) {
+        fullName = slice
+        break
+      }
+    }
+    if (fullName === null || fullName.length < 2) return false
+    // ④ 该全称短语必须逐词出现在**原文**中（否则就是借形态编造新技术）
+    return fullNameExistsInOriginal(fullName)
+  }
+
+  /**
+   * 判断实体是否处于"中文术语旁的并列注记位"（`（HTTP）`、`/ CI`），
+   * 或"英文全称旁的缩写注记位"（`Google Analytics (GA)`，见 ①-c）。
+   *
+   * 这类形态是把同一种说法的两种写法并列——ATS 关键词对齐的常规动作。
    *
    * 【只认括号与斜杠，**不认冒号/顿号**（实测抓出的绕过）】
    * `技能含：Redis`、`掌握、Kafka` 这类是"引出新一项"，不是并列注记；
@@ -2347,6 +2691,9 @@ export function verifyRewrite({ original, rewritten, claimedKeywords } = {}) {
    * 故一律按"新增主张"处理（严格侧）——这类是真正的夹带通道，
    * 代价是 `超文本传输协议（HyperText Transfer Protocol）` 会被误拦（已知误报）。
    *
+   * 括号前是**英文全称**时是规则 ② 的反方向（全称 → 缩写），
+   * 由 ①-c 处理。
+   *
    * @param {string} unit 句子
    * @param {string} entity 实体
    * @returns {boolean} 是否处于并列注记位
@@ -2371,8 +2718,30 @@ export function verifyRewrite({ original, rewritten, claimedKeywords } = {}) {
       const lastToken = /([\u4e00-\u9fa5A-Za-z0-9.+#-]+)\s*$/.exec(beforeBracket)
       // 括号前是中文 → 中文↔英文并列，放行
       if (lastToken !== null && /[\u4e00-\u9fa5]/.test(lastToken[1])) return true
-      // 括号前是拉丁词 → 交给规则 ② 判断（多为编造，如 `Java（Redis）`）
+      // 括号前是拉丁词 → 交给规则 ①-c / ② 判断（多为编造，如 `Java（Redis）`）
     }
+    // ①-c **英文「全称 + 缩写」的直接并列**（英文简历实测抓出的误报）。
+    //
+    // 中文侧的 ATS 并列是 `中文术语（HTTP）`——括号前是中文，规则 ① 已放行。
+    // 英文简历**没有中文术语可并列**，同一个动作只能表现为全称与缩写直接相邻：
+    //   `Google Analytics (GA)`、`Google Analytics（GA）`、`Google Analytics / GA`
+    // 而规则 ① 只看「括号前是否中文」、规则 ② 只认「括号前是全大写缩写」，
+    // 两个方向都接不住它 → 落入 ④「新增技能」→ **拒绝导出**。
+    // 用户视角是"做了 ATS 关键词对齐反而拿不到文件"，
+    // 与 S1-1（`CSS → SCSS` 误拒）属同一类缺陷——正是本项目最严重的一类。
+    //
+    // 判据与规则 ② **同源，只是方向相反**：规则 ② 是「缩写 → 其展开」，
+    // 本规则是「全称 → 其首字母缩写」。两侧都必须与**原文**吻合，故不新增通道：
+    //   · `Google Analytics (GA)`   → 缩写 GA == 原文全称首字母 GA ✅ 放行
+    //   · `Java (Redis)`            → Redis ≠ Java 的首字母 J         ✅ 仍拦
+    //   · `数据库 (Redis Cluster)`  → 括号前是中文，非"英文全称"      ✅ 仍拦
+    //   · `(Redis) Google Analytics`→ Redis ≠ Google Analytics 首字母 ✅ 仍拦
+    //
+    // 【为什么必须要求"全称在原文中逐词出现"】
+    // 只看"首字母拼起来等于缩写"会被普通词蹭到（`Java` 的首字母拼写恰好是
+    // `JAVA`）。故额外要求该全称短语**作为连续 token 序列存在于原文**——
+    // 这样放行的只可能是"原文已有的全称 + 它的缩写"，不可能凭空长出技能主张。
+    if (isFullNameAcronymAnnotation(unit, entity)) return true
     // ①-b **斜杠并列**要区分两种含义（实测抓出的绕过）：
     //   · 注记斜杠：`持续集成流程 / CI`——右边是**左边中文术语的英文写法**
     //   · 列表斜杠：`Java / Spring Boot / MySQL / Redis / Kafka`——两边是**并列的技术栈**
@@ -3323,40 +3692,50 @@ export function verifyRewrite({ original, rewritten, claimedKeywords } = {}) {
   //
   // 起止日期属于"绝不可改写"的事实字段。改写若动了年份/月份，
   // 会导致与背调信息不符。
-  if (originalDates.size > 0) {
-    // 原文涉及的年份，以及**已有具体月份**的年份。
-    const originalYears = new Set([...originalDates].map((d) => d.slice(0, 4)))
-    const yearsWithMonth = new Set(
-      [...originalDates].filter((d) => d.length > 4).map((d) => d.slice(0, 4)),
-    )
-    const changedDates = [...rewrittenDates].filter((d) => {
-      if (originalDates.has(d)) return false
-      const year = d.slice(0, 4)
-      // 年份原文没出现过 → 改动（新时间点）
-      if (!originalYears.has(year)) return true
-      // 【⚠️ 同一年内的**月份改动**必须抓（实测抓出的漏报）】
-      //
-      // 早期逻辑是"年份出现过就放行"，动机是容忍"补全月份"
-      //（`2022` → `2022年9月`）。但那样实现太粗，连带放过了真改动：
-      //   `- 2022年9月入职；` → `- 2022年10月入职；`
-      //   实测零告警 —— 而"起止日期改动"正是最该拦的事实错误之一。
-      //
-      // 正确区分：
-      //   · 原文该年**只有年份、没有月份** → 补全月份属写法完善 → 放行
-      //   · 原文该年**已有具体月份**、改写换成别的月份 → 真改动 → 拦住
-      if (d.length > 4 && yearsWithMonth.has(year)) return true
-      return false
+  //
+  // 【⚠️ 本项**不得**以"原文有日期"为前提（实测抓出的静默放行）】
+  // 早期写成 `if (originalDates.size > 0)`，于是原文**完全没有日期**时，
+  // 整项检查直接跳过，而数字检查又会把新日期当"日期成分"剔除掉，
+  // 两个检查同时失灵 —— 编造日期**完全静默**：
+  //   `- 参与登录模块的重构工作；` → `- 2022 参与登录模块的重构工作；`
+  //   → `ok=true`、`findings=[]`，可导出且 `verified=true`
+  // 同一形态换成"2022年9月"、"2021.09 - 2022.06"（整段编造的任职区间）同样静默。
+  //
+  // 判据不变，只是**去掉了前提**：改写不可能凭空产生一个真实的时间点。
+  // 原有日期改动仍按下面的"年份/月份"细分逻辑处理，行为不变。
+  //
+  // 原文涉及的年份，以及**已有具体月份**的年份。
+  const originalYears = new Set([...originalDates].map((d) => d.slice(0, 4)))
+  const yearsWithMonth = new Set(
+    [...originalDates].filter((d) => d.length > 4).map((d) => d.slice(0, 4)),
+  )
+  const changedDates = [...rewrittenDates].filter((d) => {
+    if (originalDates.has(d)) return false
+    const year = d.slice(0, 4)
+    // 年份原文没出现过 → 改动（新时间点）
+    if (!originalYears.has(year)) return true
+    // 【⚠️ 同一年内的**月份改动**必须抓（实测抓出的漏报）】
+    //
+    // 早期逻辑是"年份出现过就放行"，动机是容忍"补全月份"
+    //（`2022` → `2022年9月`）。但那样实现太粗，连带放过了真改动：
+    //   `- 2022年9月入职；` → `- 2022年10月入职；`
+    //   实测零告警 —— 而"起止日期改动"正是最该拦的事实错误之一。
+    //
+    // 正确区分：
+    //   · 原文该年**只有年份、没有月份** → 补全月份属写法完善 → 放行
+    //   · 原文该年**已有具体月份**、改写换成别的月份 → 真改动 → 拦住
+    if (d.length > 4 && yearsWithMonth.has(year)) return true
+    return false
+  })
+  if (changedDates.length > 0) {
+    findings.push({
+      code: 'FABRICATED_DATE',
+      severity: 'error',
+      message:
+        `改写后出现原文没有的时间点：${changedDates.join('、')}。` +
+        '起止日期属于事实字段，不得改动。',
+      evidence: changedDates,
     })
-    if (changedDates.length > 0) {
-      findings.push({
-        code: 'FABRICATED_DATE',
-        severity: 'error',
-        message:
-          `改写后出现原文没有的时间点：${changedDates.join('、')}。` +
-          '起止日期属于事实字段，不得改动。',
-        evidence: changedDates,
-      })
-    }
   }
 
   // ── 5. 真实数据丢失（非编造，但会削弱简历）─────────────────────

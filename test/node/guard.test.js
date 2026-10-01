@@ -52,6 +52,35 @@ describe('守卫：文本与 token 提取', () => {
   // ATS 对齐时最常见的三类动作——中文数量级换算、日期格式规范化、
   // 联系方式加分隔符——全部被判为编造并**拒绝导出**，用户永久拿不到文件。
   // 更糟的是错误指令要求"删除编造内容"，模型照做会删掉用户真实电话。
+  test('全角拉丁技术名必须与半角等价（静默放行 + 误拒，双向）', () => {
+    // 【实测抓出的双向缺陷】中文输入法下 `Redis` 极易写成 `Ｒｅｄｉｓ`。
+    // 早期只归一化全角**数字**，全角**字母**无人处理，于是：
+    //   ① 静默放行：`Java、Ｒｅｄｉｓ 与 MySQL` 连 warn 候选都进不去
+    //      （`Ｒｅｄｉｓ` 不是 ASCII `[A-Za-z]`）→ findings=[]，可导出
+    //   ② 误拒：`Ｊａｖａ` → `Java`（纯写法规整、一字未增）被判编造并拒绝导出
+    // 两者同根，一处归一化同时修好。
+    for (const [original, rewritten] of [
+      ['- 熟悉 Java 与 MySQL；', '- 熟悉 Java、Ｒｅｄｉｓ 与 MySQL；'],
+      ['- 熟悉 Java 与 MySQL；', '- 熟悉 Java（Ｒｅｄｉｓ）与 MySQL；'],
+    ]) {
+      const report = verifyRewrite({ original, rewritten })
+      assert.equal(report.ok, false, `全角写法不得成为编造的隐身衣：${rewritten}`)
+      assert.ok(report.findings.some((f) => f.code === 'FABRICATED_ENTITY'))
+    }
+    // 反向：全角→半角是纯写法规整，必须放行（否则是投递死锁）
+    for (const [original, rewritten] of [
+      ['- 熟悉 Ｊａｖａ 与 ＭｙＳＱＬ 的使用；', '- 熟悉 Java 与 MySQL 的使用；'],
+      ['- 熟悉 Java 与 MySQL 的使用；', '- 熟悉 Ｊａｖａ 与 ＭｙＳＱＬ 的使用；'],
+    ]) {
+      const report = verifyRewrite({ original, rewritten })
+      assert.deepEqual(
+        report.findings.filter((f) => f.severity === 'error').map((f) => f.code),
+        [],
+        `全角↔半角只是写法差异，不得拒绝导出：${rewritten}`,
+      )
+    }
+  })
+
   test('中文数量级写法归一化为同一数值（8万 = 80000）', () => {
     assert.deepEqual([...extractNumericTokens('服务 8 万用户')], ['80000'])
     assert.deepEqual([...extractNumericTokens('服务 80000 用户')], ['80000'])
@@ -362,6 +391,102 @@ describe('守卫：时间线一致性（日期属事实字段）', () => {
       !codes.includes('FABRICATED_NUMBER'),
       '日期不应同时被数字检查报告（重复报告会稀释报告可用性）',
     )
+  })
+
+  // ── 原文**没有**日期时，凭空出现的日期必须被抓住（实测抓出的静默放行）──
+  //
+  // 【缺陷背景】日期检查原以 `originalDates.size > 0` 为前提，
+  // 于是原文完全没有日期时整项直接跳过；而数字检查又把新日期当"日期成分"
+  // 剔除掉 —— 两个检查同时失灵，编造日期**完全静默**：
+  //   `- 参与登录模块的重构工作；` → `- 2022 参与登录模块的重构工作；`
+  //   → `ok=true`、`findings=[]`，可导出且 `verified=true`。
+  // 判据本身没错，错的是那个前提：改写不可能凭空产生真实时间点。
+  test('原文无日期时凭空新增日期必须拦下（此前完全静默）', () => {
+    for (const rewritten of [
+      '2022 参与登录模块的重构工作；',
+      '2022年9月 参与登录模块的重构工作；',
+      '2022届 参与登录模块的重构工作；',
+      '2021.09 - 2022.06 参与登录模块的重构工作；',
+    ]) {
+      const report = verifyRewrite({
+        original: '参与登录模块的重构工作；',
+        rewritten,
+      })
+      assert.equal(report.ok, false, `凭空新增的时间点必须拦下：${rewritten}`)
+      assert.ok(
+        report.findings.some((f) => f.code === 'FABRICATED_DATE' && f.severity === 'error'),
+        `必须报 FABRICATED_DATE（error）：${rewritten}`,
+      )
+    }
+  })
+
+  test('但"两位数中文化年份"的补全写法不得误报（配套补齐解析器）', () => {
+    // 【为什么这条必须有】去掉"原文有日期"这个前提后，`22年` → `2022年`
+    // 这类**纯写法补全**会被判成"新增时间点"并拒绝导出 —— 那是拿一个误报
+    // 换一个静默放行，两边都是本项目最忌的结果。
+    // 故正解是把两位数年份/中文数字年份**解析出来**，而不是把检查放回去。
+    for (const [original, rewritten] of [
+      ['- 22年入职云线科技公司', '- 2022年入职云线科技公司'],
+      ['- 二〇二二年入职云线科技公司', '- 2022年入职云线科技公司'],
+      ['- 99年入职', '- 1999年入职'],
+      // 反向也要成立（避免只认一个方向）
+      ['- 2022年入职云线科技公司', '- 22年入职云线科技公司'],
+    ]) {
+      const report = verifyRewrite({ original, rewritten })
+      assert.deepEqual(
+        report.findings.filter((f) => f.severity === 'error').map((f) => f.code),
+        [],
+        `同为写法差异，不得拒绝导出：${rewritten}`,
+      )
+    }
+  })
+
+  // ── 与日期同值的**真实数量**不得被当成日期成分剔除（静默放行）─────────
+  //
+  // 【缺陷背景】数字检查原按**值**从集合里剔除"与某日期同年/同月的裸数字"，
+  // 于是编造的数字只要与日期同值就被删掉：
+  //   `2022.06 … 实习 6 个月` → 编造的 `6` 被当"月份 06"删掉
+  //   `…服务 2022 名用户`      → 编造的 `2022` 被当"年份分量"删掉
+  //   `…完成 06 项任务`        → 编造的 `06` 被当"月份"删掉
+  // 三者都 `ok=true`、`findings=[]`。现改为**按位置**遮蔽日期片段，
+  // 并用汉语量词区分"年份"与"数量"（量词是封闭词类，可安全枚举）。
+  test('与日期同值的编造数量必须被抓住（此前按值剔除导致静默）', () => {
+    for (const [original, rewritten] of [
+      ['- 2022.06 在某互联网公司实习；', '- 2022.06 在某互联网公司实习 6 个月；'],
+      ['- 2022.06 实习；', '- 2022.06 实习，服务 2022 名用户；'],
+      ['- 2022.06 实习；', '- 2022.06 实习，完成 06 项任务；'],
+      ['- 参与登录模块的重构工作；', '- 参与登录模块的重构工作 6 个月；'],
+    ]) {
+      const report = verifyRewrite({ original, rewritten })
+      assert.equal(report.ok, false, `编造的数量必须拦下，不得被当日期成分剔除：${rewritten}`)
+      assert.ok(
+        report.findings.some((f) => f.code === 'FABRICATED_NUMBER' && f.severity === 'error'),
+        `必须报 FABRICATED_NUMBER（error）：${rewritten}`,
+      )
+    }
+  })
+
+  test('但日期的等价写法仍不得误报（按位置遮蔽的代价锁定）', () => {
+    // 反向锁定：改成按位置遮蔽后，这些**纯格式规范化**必须仍然放行，
+    // 且数值+单位（`2MB`/`2000KB`）不得被年份规则啃掉。
+    for (const [original, rewritten] of [
+      ['- 2022.06 实习；', '- 2022年6月实习；'],
+      ['- 2026.03 入职；', '- 2026年3月入职；'],
+      ['- 服务 8 万用户；', '- 服务 80000 用户；'],
+      ['- 2022 入职；', '- 2022 入职；'],
+      ['- 2019 - 2021 在某公司；', '- 2019 - 2021 在某公司；'],
+    ]) {
+      const report = verifyRewrite({ original, rewritten })
+      assert.deepEqual(
+        report.findings.filter((f) => f.severity === 'error').map((f) => f.code),
+        [],
+        `日期/数值的等价写法不得拒绝导出：${rewritten}`,
+      )
+    }
+    // 数值真的变了仍必须拦（防止"按位置遮蔽"把单位数值也一起放过）
+    const report = verifyRewrite({ original: '- 体积 2MB；', rewritten: '- 体积 2000KB；' })
+    assert.equal(report.ok, false, '数值真的改变必须拦下')
+    assert.ok(report.findings.some((f) => f.code === 'FABRICATED_NUMBER'))
   })
 })
 
@@ -710,6 +835,100 @@ describe('守卫：真实简历文本上的专名与技术栈检查（S1-2）', 
     const report = verifyRewrite({ original: RESUME, rewritten })
     assert.equal(report.ok, false, '原文没有的技术名不得凭空出现')
     assert.ok(report.findings.some((f) => f.code === 'FABRICATED_ENTITY'))
+  })
+
+  // ── 学历机构后缀缺口：换学校曾被静默放行（本轮独立审查抓出）────────────
+  //
+  // 【缺陷背景】机构后缀表原有 大学/学院，却没有中小学。于是"换学校"
+  // 这类最典型的编造完全无痕——该句既无数字、又无拉丁专名、又无职责动词：
+  //   `- 在某职业学校完成计算机课程学习；` → `- 在某某中学完成…；`
+  //   → `ok=true`、`findings=[]`。
+  // 注意这不是"无后缀机构名"那条**已声明**的边界（`中学` 是带后缀的机构），
+  // 而是列举缺口。
+  test('学历机构后缀（中学/学校/培训中心）的换名必须抓住', () => {
+    for (const [original, rewritten] of [
+      ['- 在某职业学校完成计算机课程学习；', '- 在某某中学完成计算机课程学习；'],
+      ['- 在某职业学校完成学习；', '- 在某某小学完成学习；'],
+      ['- 在某职业学校完成学习；', '- 在某某高中完成学习；'],
+      ['- 在某职业学校完成学习；', '- 在某某学校完成学习；'],
+      ['- 在某职业学校完成学习；', '- 在某某培训中心完成学习；'],
+      ['- 在某职业学校完成学习；', '- 在某某职业技术学院完成学习；'],
+    ]) {
+      const report = verifyRewrite({ original, rewritten })
+      assert.equal(report.ok, false, `换机构名必须拦下：${rewritten}`)
+      assert.ok(report.findings.some((f) => f.code === 'FABRICATED_ENTITY'))
+    }
+    // 反向：机构名未变（只是措辞调整）不得误报
+    const same = verifyRewrite({
+      original: '- 在某职业学校完成计算机课程学习；',
+      rewritten: '- 在某职业学校完成了计算机课程的学习；',
+    })
+    assert.deepEqual(
+      same.findings.filter((f) => f.severity === 'error').map((f) => f.code),
+      [],
+      '机构名未变不得误报',
+    )
+  })
+
+  // ── 符号型技术名（C++ / C# / .NET）曾被两个严重级同时排除 ──────────────
+  //
+  // 【缺陷背景】`isLatinIdentifierCandidate` 要求"以字母开头且 ≥2 个字母、
+  // 不含非字母数字"，于是 `C++`/`C#`/`F#`（含符号、仅 1 个字母）与
+  // `.NET`（前导点）既不在 error 候选集、也不在 warn 候选集 —— **完全不可见**：
+  //   `- 熟悉 Java 与 Python 开发；` → `- 熟悉 Java、C++ 与 Python 开发；`
+  //   → `ok=true`、`findings=[]`，凭空新增一项技能。
+  // 这与 `GUARD_LIMITATIONS` 承诺的"用连接词并进列表 → 必须修正"直接矛盾。
+  // 普通英文散文里不可能出现 `+`/`#`/前导点，故判 error 不会误报。
+  test('符号型技术名（C++ / C# / .NET）新增必须抓住', () => {
+    for (const added of ['C++', 'C#', 'F#', '.NET']) {
+      const report = verifyRewrite({
+        original: '- 熟悉 Java 与 Python 开发；',
+        rewritten: `- 熟悉 Java、${added} 与 Python 开发；`,
+      })
+      assert.equal(report.ok, false, `凭空新增 ${added} 必须拦下`)
+      assert.ok(
+        report.findings.some((f) => f.code === 'FABRICATED_ENTITY' && f.severity === 'error'),
+        `必须报 FABRICATED_ENTITY（error）：${added}`,
+      )
+    }
+    // 反向：原文已有时不得误报
+    for (const [original, rewritten] of [
+      ['- 熟悉 C++ 与 Python 开发；', '- 熟悉 C++ 与 Python 的开发工作；'],
+      ['- 熟悉 .NET 开发；', '- 熟悉 .NET 的开发工作；'],
+    ]) {
+      const report = verifyRewrite({ original, rewritten })
+      assert.deepEqual(
+        report.findings.filter((f) => f.severity === 'error').map((f) => f.code),
+        [],
+        `原文已有的技术名不得误报：${rewritten}`,
+      )
+    }
+  })
+
+  test('裸单字母语言名（C / R）至少必须报出待确认（不得静默）', () => {
+    // 【为什么是 warn 而不是 error】单字母高度歧义（姓名缩写、章节号、
+    // 英文代词 `I`、冠词 `A`），判 error 会误报并阻断交付。
+    // 但"完全静默"是本项目最严重的一类缺陷，故降级为 warn 而非放过：
+    // 严重度排序 静默放行 > 误报 > 漏报（有告警）。
+    for (const lang of ['C', 'R']) {
+      const report = verifyRewrite({
+        original: '- 熟悉 Java 与 Python 开发；',
+        rewritten: `- 熟悉 Java、${lang} 与 Python 开发；`,
+      })
+      assert.ok(
+        report.findings.some((f) => f.code === 'AMBIGUOUS_NEW_TERM' && f.severity === 'warn'),
+        `裸单字母 ${lang} 至少要有告警，不得静默`,
+      )
+    }
+    // 英文代词/冠词不得被当技术名（否则英文简历全是噪声）
+    const pronoun = verifyRewrite({
+      original: '- Built APIs with Java and MySQL',
+      rewritten: '- I built APIs with Java and MySQL',
+    })
+    assert.ok(
+      !pronoun.findings.some((f) => (f.evidence ?? []).includes('I')),
+      '英文代词 I 不得被当技术名',
+    )
   })
 
   test('行首补一个原文没有的技术名必须被抓住：TypeScript', () => {
@@ -1463,6 +1682,96 @@ describe('守卫：结构性判据不得放掉真编造（另一侧锁定）', (
     ]) {
       const report = verifyRewrite({ original, rewritten })
       assert.equal(report.ok, false, `借括号夹带原文没有的内容必须拦下：${rewritten}`)
+    }
+  })
+
+  // ── 英文「全称 + 缩写」直接并列（本轮实测抓出的误报）────────────────────
+  //
+  // 【缺陷背景】中文侧的 ATS 并列写作 `中文术语（HTTP）`，括号前是中文，
+  // 由规则 ① 放行。英文简历**没有中文术语可并列**，同一个动作只能表现为
+  // 全称与缩写直接相邻：
+  //   `Google Analytics (GA)`、`Google Analytics（GA）`、`Google Analytics / GA`
+  // 而规则 ① 只看「括号前是否中文」、规则 ② 只认「括号前是全大写缩写」，
+  // 两个方向都接不住它 → 落入"新增技能" → **拒绝导出**。
+  // 用户视角是"做了 ATS 关键词对齐反而拿不到文件"，
+  // 与 S1-1（`CSS → SCSS` 误拒）属同一类缺陷。
+  //
+  // 修法：新增规则 ①-c「全称 + 其首字母缩写」，并要求**该全称短语必须在原文中
+  // 逐词存在**。这条限定是关键——否则 `Fake Skill (FS)` 的首字母同样是 `FS`，
+  // 反而会把凭空编造的技能放行（下方反向用例锁定这一点）。
+  test('英文「全称 + 缩写」并列必须放行（英文简历的 ATS 对齐动作）', () => {
+    for (const [original, rewritten] of [
+      [
+        'SKILLS\nExcel, PowerPoint, Google Analytics',
+        'SKILLS\nExcel, PowerPoint, Google Analytics (GA)',
+      ],
+      // 全角括号：中文输入法下最常见
+      [
+        'SKILLS\nExcel, PowerPoint, Google Analytics',
+        'SKILLS\nExcel, PowerPoint, Google Analytics（GA）',
+      ],
+      // 斜杠并列
+      [
+        'SKILLS\nExcel, PowerPoint, Google Analytics',
+        'SKILLS\nExcel, PowerPoint, Google Analytics / GA',
+      ],
+      // 行内（非技能区）
+      ['- Deployed services on Amazon Web Services', '- Deployed services on Amazon Web Services (AWS)'],
+      ['- Used Google Analytics for reporting', '- Used Google Analytics (GA) for reporting'],
+      // 缩写在前、全称在括号里——同一个动作的另一种书写顺序，必须同样放行
+      ['SKILLS\nExcel, Google Analytics', 'SKILLS\nExcel, GA (Google Analytics)'],
+      ['SKILLS\nAmazon Web Services', 'SKILLS\nAWS (Amazon Web Services)'],
+    ]) {
+      const report = verifyRewrite({ original, rewritten })
+      assert.deepEqual(
+        report.findings.filter((f) => f.severity === 'error').map((f) => f.code),
+        [],
+        `英文「全称 + 缩写」是 ATS 常规对齐动作，不得拒绝导出：${rewritten}`,
+      )
+      // 但必须留下待确认痕迹（与中文侧同类形态一致，不得静默）
+      assert.ok(
+        report.findings.some((f) => f.code === 'AMBIGUOUS_NEW_TERM'),
+        `必须报出待确认，不得静默放过：${rewritten}`,
+      )
+    }
+  })
+
+  test('但「全称 + 缩写」形态不得成为编造通道（全称必须在原文里）', () => {
+    // 反向锁定：首字母拼写本身不足以证明"这个全称是已有的"，
+    // 必须回到原文核对。否则 `Fake Skill (FS)` 会被放行。
+    const skills = 'SKILLS\nExcel, PowerPoint, Google Analytics'
+    for (const rewritten of [
+      // 全称是编造的（原文没有 Fake Skill）
+      'SKILLS\nExcel, PowerPoint, Fake Skill (FS)',
+      // 全称在原文，但括号里的缩写对应的是**别的**技术 → 明确夹带
+      'SKILLS\nExcel, PowerPoint, Google Analytics (Tableau)',
+      // 借形态追加一项新技术
+      'SKILLS\nExcel, PowerPoint, Google Analytics (GA), Tableau',
+      // 缩写在前时同样是编造（全称在原文里不存在）
+      'SKILLS\nExcel, PowerPoint, FS (Fake Skill)',
+      // 缩写在前时对应的是别的技术
+      'SKILLS\nExcel, PowerPoint, Tableau (Google Analytics)',
+    ]) {
+      const report = verifyRewrite({ original: skills, rewritten })
+      assert.equal(report.ok, false, `不得借「全称 + 缩写」形态放行编造：${rewritten}`)
+      assert.ok(
+        report.findings.some((f) => f.code === 'FABRICATED_ENTITY' && f.severity === 'error'),
+        `必须报 FABRICATED_ENTITY（error）：${rewritten}`,
+      )
+    }
+    // 另起一行只写缩写：仍按"新增技能"处理（与编造 `- 熟悉 Redis；` 无法区分）
+    for (const [original, rewritten] of [
+      [
+        '- Built dashboards with Google Analytics',
+        '- Built dashboards with Google Analytics\n- Familiar with GA',
+      ],
+      [
+        'SKILLS\nExcel, PowerPoint, Google Analytics',
+        'SKILLS\nExcel, PowerPoint, Google Analytics\nGA',
+      ],
+    ]) {
+      const report = verifyRewrite({ original, rewritten })
+      assert.equal(report.ok, false, `另起一行的纯增量缩写必须拦下：${rewritten}`)
     }
   })
 
@@ -2528,6 +2837,13 @@ describe('守卫：结构性判据不得放掉真编造（另一侧锁定）', (
       ['超文本传输协议（HyperText…）放行', '- 熟悉超文本传输协议的使用；', '- 熟悉超文本传输协议（HyperText Transfer Protocol）的使用；', true],
       ['专业技能（Skills）放行', '# 张伟\n## 专业技能\n- 熟悉 Java；', '# 张伟\n## 专业技能（Skills）\n- 熟悉 Java；', true],
       ['JVM（Java Virtual Machine）放行', '- 精通 JVM 调优；', '- 精通 JVM（Java Virtual Machine）调优；', true],
+      ['Google Analytics (GA) 放行', 'SKILLS\nExcel, Google Analytics', 'SKILLS\nExcel, Google Analytics (GA)', true],
+      ['Google Analytics / GA 放行', 'SKILLS\nExcel, Google Analytics', 'SKILLS\nExcel, Google Analytics / GA', true],
+      ['GA (Google Analytics) 放行（缩写在前）', 'SKILLS\nExcel, Google Analytics', 'SKILLS\nExcel, GA (Google Analytics)', true],
+      ['Fake Skill (FS) 拦住（全称不在原文）', 'SKILLS\nExcel, Google Analytics', 'SKILLS\nExcel, Fake Skill (FS)', false],
+      ['FS (Fake Skill) 拦住（缩写在前）', 'SKILLS\nExcel, Google Analytics', 'SKILLS\nExcel, FS (Fake Skill)', false],
+      ['Google Analytics (Tableau) 拦住（缩写对应别的技术）', 'SKILLS\nExcel, Google Analytics', 'SKILLS\nExcel, Google Analytics (Tableau)', false],
+      ['另起一行只写 GA 拦住', 'SKILLS\nExcel, Google Analytics', 'SKILLS\nExcel, Google Analytics\nGA', false],
       ['数据库（Redis Cluster）拦住', '- 熟悉数据库的使用；', '- 熟悉数据库（Redis Cluster）的使用；', false],
       ['Java（Just Another …）拦住', '- 熟悉 Java；', '- 熟悉 Java（Just Another Vague Abbreviation）；', false],
       ['项目经历（用户增长系统）拦住', '# 张伟\n## 项目经历\n- 熟悉 Java；', '# 张伟\n## 项目经历（用户增长系统）\n- 熟悉 Java；', false],
