@@ -304,6 +304,10 @@ export function buildVerifyValue({ original, rewritten, claimedKeywords } = {}) 
       VANISHED_TECH_TERM: '原文的技术名消失且无其它技术名接替，需确认是改成中文表述还是删除',
       UNIT_CASE_CHANGED: '容量单位的大小写被改动（b/B 是比特与字节，相差 8 倍），需确认是否误改',
       POSSIBLE_RESPONSIBILITY_INFLATION: '合并条目处疑似抬高了职责，需人工确认',
+      POSSIBLE_HEADER_INFLATION:
+        '简历头部行（求职意向/自评）的职责强度被抬高，需确认是陈述目标还是虚报经历',
+      POSSIBLE_DROPPED_HEADER_CONTENT:
+        '有单元格被当作表格表头剥离、但内容在原文找不到出处，需确认它是否为内容而非列名',
     })
     const warnFindings = report.findings.filter((f) => f.severity === 'warn')
     const described = [

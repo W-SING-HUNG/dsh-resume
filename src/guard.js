@@ -49,6 +49,7 @@ export const GUARD_LIMITATIONS = [
   '**多词英文注记只认"全大写缩写 + 其展开"**：`JVM（Java Virtual Machine）`、`GPA（Grade Point Average）`、`HTTP（HyperText Transfer Protocol）` 会被放行（判"建议检查"）——它们只是把**已有缩写**写成全称，没有新增技能主张。而 `Java（Just Another Vague Abbreviation）`、`数据库（Redis Cluster）` 会被拦：前者括号前是**普通单词而非缩写**（`Java` 带小写字母），后者括号内是**原文没有的技能**。括号前是**中文**时（`超文本传输协议（HyperText Transfer Protocol）`、`## 专业技能（Skills）`）同样放行——中文术语并列英文是 ATS 常规动作，无法也不必做首字母校验。',
   '**英文侧反向形态「全称 + 其缩写」同样放行**（`Google Analytics (GA)`、`Google Analytics（GA）`、`Google Analytics / GA`，以及**缩写在前**的 `GA (Google Analytics)`）——中文简历用 `中文术语（HTTP）`，英文简历没有中文可并列，只能写作全称与缩写直接相邻，属同一 ATS 对齐动作。放行条件是**该全称短语必须在原文中逐词存在**，故不构成编造通道：`Fake Skill (FS)`、`FS (Fake Skill)`（全称是编造的）、`Google Analytics (Tableau)`、`Tableau (Google Analytics)`（缩写对应别的技术）、`Google Analytics (GA), Tableau`（借形态追加新技术）**均仍被拦**；**另起一行**只写缩写（`- Familiar with GA`）也仍按"新增技能"处理（与编造 `- 熟悉 Redis；` 文本上无法区分），请把缩写并入原句。',
   '**英文简历的"缩写 ⇄ 全称"识别三类形态**：① **逐词首字母**：`JVM ⇄ Java Virtual Machine`、`SQL ⇄ Structured Query Language`；② **词内大写**：`HTTP ⇄ HyperText Transfer Protocol`（HyperText 贡献 H 与 T）；③ **数字式**：`K8s ⇄ Kubernetes`、`i18n ⇄ internationalization`（首字母 + 中间字母数 + 尾字母，判据可验证）。三者都报"建议检查"而不阻断。**唯一覆盖不到、会判"必须修正"（已知边界）**：**词内取字母型**如 `REST` = **R**epresentational State Transfer（`E` 取自词内而非任何词首）——它与"普通单词恰好首字母拼成同一串"（如 `Java` → `JAVA`）在纯文本上无法区分，放宽会放过 `Java → Java Virtual Machine`（那确实新增了 JVM 主张）。遇到这类时，请保留缩写写法本身（`Built REST APIs` 原样不动），不要改写成全称。',
+  '**在已配对的条目里"夹带"一小段中文主张不会被发现**（已知边界，经两版实现尝试后确认无法用文本判据解决）：整条新增检测按**整条相似度**判定，于是 `- 参与商品列表页的开发工作；` → `- 参与商品列表页的开发工作，保证零故障；` 里多出的「保证零故障」若不含数字/机构名/技术专名/词表内职责动词，四个检查全不命中；把原条目复制一条并换掉宾语（`商品列表页` → `用户列表页`）同理。修它需要区分"新增主张"与"换一种说法"，而**纯文本层面二者不可分离**——实测两版判据（整段 indexOf / 反复剔除最长公共汉字片段）都会把项目自身的合法改写（`参与…开发工作` → `负责…核心模块开发工作`，残留「核心模块」）判为可疑，给每条合法改写都发告警等于让告警常亮、反而使守卫被忽略。故如实声明而不假装堵住。',
   '本校验只做文本特征比对，不判断内容是否真实。它拦得住"与原文对不上"的编造，拦不住"原文本身就写了假的"。',
 ]
 
@@ -65,6 +66,10 @@ export const GUARD_LIMITATIONS = [
 //     · 学历机构换名（`职业学校`→`某某中学`）：补齐机构后缀表
 //     · 符号型技术名（`C++`/`C#`/`.NET`）：新增 isSymbolTechName 判据
 //     · 裸单字母语言名（`C`/`R`）：降为 warn（单字母歧义大，但不得静默）
+//     · 头部行里的职责主张：新增 POSSIBLE_HEADER_INFLATION（warn）
+//     · 被当表头剥掉的编造单元格：新增 POSSIBLE_DROPPED_HEADER_CONTENT（warn）
+//     另：GUARD_LIMITATIONS 新增一条"已配对条目夹带中文主张无法用文本判据解决"
+//     （两版实现均被实测否决，故如实声明而非假装堵住）。
 // 1.2.0：判定规则发生多处实质变更，必须递增以便回溯——
 //   · 专名识别：按"是否含汉字"分流（原来只认首字母大写 → 真实中文简历上近乎空转）
 //   · 实体比对：token 边界精确匹配（原来用裸子串 → 截断换名漏报）
@@ -1219,6 +1224,41 @@ function isStructuralLine(line) {
 }
 
 /**
+ * 提取**结构性头部行**（姓名/求职意向/联系方式行）。
+ *
+ * 【为什么需要（本轮独立审查抓出的静默放行）】
+ * 这类行被 {@link extractContentUnits} 排除，于是它们既不在"整条新增"比对里、
+ * 也不在逐对职责比对里；而文档级兜底又因正文能配对而关闭。结果：
+ *   `前端开发工程师 | 138-0000-0000 | dev@example.com`
+ *   → `独立主导前端架构 | 138-0000-0000 | dev@example.com`
+ * 头部被塞进"独立主导"这一更强主张，**`ok=true`、`findings=[]`**。
+ * 同样语义写进正文却能正常拦住，可见是结构性缺口而非刻意取舍。
+ *
+ * 排除头部行本身是必要的（改写补全头部/联系方式是正常操作，报为编造是误报），
+ * 但"排除"不等于"整类不可见"——故单独提取出来做职责强度对照。
+ *
+ * @param {string} text 待提取文本
+ * @returns {string[]} 结构性头部行（已去标记、去空白）
+ */
+export function extractStructuralLines(text) {
+  const src = normalizeText(text)
+  if (src === '') return []
+  const out = []
+  for (const rawLine of src.split('\n')) {
+    const line = rawLine
+      .replace(/^\s*#{1,6}\s*/, '')
+      .replace(/^\s*[-*+]\s+/, '')
+      .replace(/^\s*\d+[.)]\s+/, '')
+      .replace(/\*\*/g, '')
+      .trim()
+    if (line === '') continue
+    if (!isStructuralLine(line)) continue
+    out.push(line)
+  }
+  return out
+}
+
+/**
  * 把文本切分为"内容单元"（bullet 行 / 短段落）。
  *
  * 用途：逐条比对改写结果与原文，发现**整条新增**的内容。
@@ -1804,8 +1844,7 @@ export function extractResponsibilityLevel(text) {
 export function stripMarkdownSyntax(input) {
   if (typeof input !== 'string') return ''
   const lines = input.split('\n')
-  const isTableRow = (/** @type {string} */ l) => /^\s*\|/.test(l)
-  // ── 真正的表格分隔行 ─────────────────────────────────────────────
+  const isTableRow = (/** @type {string} */ l) => /^\s*\|/.test(l)  // ── 真正的表格分隔行 ─────────────────────────────────────────────
   //
   // 【为什么必须写严（两轮审查各抓出一次）】
   // 早期用的是 `/^\s*\|[\s:|-]+\|\s*$/`——它匹配**任何只含管道/横线/冒号/空格的行**。
@@ -1850,17 +1889,12 @@ export function stripMarkdownSyntax(input) {
     if (extractResponsibilityLevel(l).maxLevel > 0) return false // 职责动词
     return true
   }
-  const headerRows = new Set()
-  lines.forEach((line, i) => {
-    if (!isSeparatorRow(line) || i === 0) return
-    const candidate = i - 1
-    // 候选表头必须是表格行，且它**不是**表格的第二行及以后
-    if (!isTableRow(lines[candidate])) return
-    if (candidate > 0 && isTableRow(lines[candidate - 1])) return
-    // 内容必须像表头（否则保留该行，让编造照常被查出）
-    if (!looksLikeHeaderRow(lines[candidate])) return
-    headerRows.add(candidate)
-  })
+  const headerRows = collectTableHeaderRowIndexes(
+    lines,
+    isTableRow,
+    isSeparatorRow,
+    looksLikeHeaderRow,
+  )
   return lines
     .map((line, i) => {
       if (headerRows.has(i)) return '' // 表格表头行
@@ -1886,6 +1920,108 @@ export function stripMarkdownSyntax(input) {
     .replace(/`([^`]*)`/g, '$1') // 行内代码 → 内容
     .replace(/\*{1,3}([^*\n]+)\*{1,3}/g, '$1') // 粗体/斜体 → 文字
     .replace(/_{1,3}([^_\n]+)_{1,3}/g, '$1')
+}
+
+/**
+ * 收集被判定为"表格表头行"的行号（这些行会在 {@link stripMarkdownSyntax} 中被剥掉）。
+ *
+ * 【为什么单独抽出来（本轮独立审查抓出的静默放行）】
+ * `looksLikeHeaderRow` 是**否定式**判据（"不含事实主张特征即视为表头"），
+ * 于是**任何**不含数字/机构/专名/职责动词的编造放在表头位都会被删掉：
+ *   `| 增长中台 | 用户增长策略规划与落地 |` + `| --- | --- |`
+ * 该行四项特征全无 → 被当表头删除 → 两侧内容单元都为空 → **完全静默**。
+ * 纯文本无法区分"真表头"与"特征缺失的编造"，故不改成肯定式判据
+ *（列名是开放集合，枚举必然滞后——本文件反复出现的教训），
+ * 而是把"被删掉的行"暴露给调用方做**兜底告警**（不阻断交付）。
+ *
+ * @param {string[]} lines 文本行
+ * @param {(l: string) => boolean} isTableRow 是否为表格行
+ * @param {(l: string) => boolean} isSeparatorRow 是否为分隔行
+ * @param {(l: string) => boolean} looksLikeHeaderRow 是否像表头
+ * @returns {Set<number>} 表头行号集合
+ */
+function collectTableHeaderRowIndexes(lines, isTableRow, isSeparatorRow, looksLikeHeaderRow) {
+  const headerRows = new Set()
+  lines.forEach((line, i) => {
+    if (!isSeparatorRow(line) || i === 0) return
+    const candidate = i - 1
+    // 候选表头必须是表格行，且它**不是**表格的第二行及以后
+    if (!isTableRow(lines[candidate])) return
+    if (candidate > 0 && isTableRow(lines[candidate - 1])) return
+    // 内容必须像表头（否则保留该行，让编造照常被查出）
+    if (!looksLikeHeaderRow(lines[candidate])) return
+    headerRows.add(candidate)
+  })
+  return headerRows
+}
+
+/**
+ * 两个字符串的**最长连续汉字公共子串**长度。
+ *
+ * @param {string} a 待判断文本
+ * @param {string} b 参照文本
+ * @returns {number} 最长连续汉字公共子串长度
+ */
+function longestSharedHanSubstring(a, b) {
+  let best = 0
+  for (let i = 0; i < a.length; i += 1) {
+    for (let j = i + best + 1; j <= a.length; j += 1) {
+      const seg = a.slice(i, j)
+      if (!/^[\u4e00-\u9fa5]+$/.test(seg)) break
+      if (b.includes(seg)) best = j - i
+    }
+  }
+  return best
+}
+
+/**
+ * 提取"被当作表格表头剥掉、但其单元格内容在原文中找不到出处"的单元格。
+ *
+ * 用途：为 {@link collectTableHeaderRowIndexes} 的否定式判据做**兜底告警**。
+ * 返回空数组表示无异常。
+ *
+ * @param {string} original 原文
+ * @param {string} rewritten 改写后文本
+ * @returns {string[]} 疑似被误当表头剥掉的编造单元格
+ */
+export function detectDroppedHeaderContent(original, rewritten) {
+  if (typeof rewritten !== 'string') return []
+  const lines = rewritten.split('\n')
+  const isTableRow = (/** @type {string} */ l) => /^\s*\|/.test(l)
+  const isSeparatorRow = (/** @type {string} */ l) =>
+    /^\s*\|?\s*:?-{3,}:?\s*(?:\|\s*:?-{3,}:?\s*)*\|?\s*$/.test(l) && l.includes('-')
+  const looksLikeHeaderRow = (/** @type {string} */ l) => {
+    if (/\d/.test(l)) return false
+    if (extractChineseOrgNames(l).size > 0) return false
+    if (extractLatinProperNouns(l).size > 0) return false
+    if (extractResponsibilityLevel(l).maxLevel > 0) return false
+    return true
+  }
+  const headerRows = collectTableHeaderRowIndexes(
+    lines,
+    isTableRow,
+    isSeparatorRow,
+    looksLikeHeaderRow,
+  )
+  if (headerRows.size === 0) return []
+  const originalFlat = normalizeForSimilarity(normalizeText(original))
+  const out = []
+  for (const i of headerRows) {
+    const cells = lines[i]
+      .replace(/^\s*\||\|\s*$/g, '')
+      .split('|')
+      .map((c) => c.trim())
+      .filter(Boolean)
+    for (const cell of cells) {
+      const cellFlat = normalizeForSimilarity(cell)
+      // 只关心含汉字且有一定长度的单元格（英文列名/短标签属常规表头）
+      if (cellFlat.length < 6 || !/[\u4e00-\u9fa5]/.test(cellFlat)) continue
+      if (originalFlat.includes(cellFlat)) continue
+      // 该单元格的汉字内容与原文无实质重合 → 疑似编造被当表头剥掉
+      if (longestSharedHanSubstring(cellFlat, originalFlat) < 4) out.push(cell)
+    }
+  }
+  return out
 }
 
 /**
@@ -3516,17 +3652,53 @@ export function verifyRewrite({ original, rewritten, claimedKeywords } = {}) {
   //   这次合并**没有抬升任何主张**。
   const originalResponsibilityWords = new Set(
     extractResponsibilityLevel(originalText).hits.map((h) => h.word),
-  )
-  /**
+  )  /**
    * 改写句里"层级高于原文最高层、且原文全篇从未出现过"的职责词。
+   *
+   * 【⚠️ "全篇出现过"这个豁免必须限定在**本句覆盖到的原文单元**内
+   *   （本轮独立审查抓出的静默放行）】
+   * 原判据是"该词在原文**任意位置**出现过就豁免"。它能修掉合并误报，
+   * 但也把**真升格**一起放过了：
+   * ```
+   *   原文：- 主导支付模块的架构设计工作；      ← 「主导」只出现在这里
+   *         - 协助并完成接口的联调与测试；
+   *   改写：- 主导支付模块的架构设计工作；
+   *         - 协助并主导接口的联调与测试；      ← 第二行把「协助」抬成「主导」
+   * ```
+   * 第二行配对到"协助并完成…"（maxLevel 3），改写后 maxLevel 4（主导），
+   * 本应判升格；却因第一行里出现过「主导」而被豁免 → `ok=true`、`findings=[]`。
+   * 而把原文换成一个不含「主导」的词（如「负责」）就能正常拦住 ——
+   * 同一处篡改仅因**别处**措辞不同而判定相反，属结构性漏洞。
+   *
+   * 现要求：豁免的前提是该词所在的原文单元**也被本改写句覆盖**
+   *（说明是"把被合并那条的强动词搬了过来"）。上例中第二行完全没有覆盖
+   *"主导支付模块的架构设计工作"，故豁免不成立 → 正确判升格；
+   * 而真正的合并句覆盖了全部被合并的原文单元 → 豁免仍然成立，不新增误报。
+   *
    * @param {{ level: number, word: string }[]} rewrittenHits
    * @param {number} originalMaxLevel
+   * @param {string} rewrittenUnit 当前改写单元（用于判定它覆盖了哪些原文单元）
    * @returns {boolean}
    */
-  const hasGenuinelyNewStrongerWord = (rewrittenHits, originalMaxLevel) =>
-    rewrittenHits.some(
-      (h) => h.level > originalMaxLevel && !originalResponsibilityWords.has(h.word),
+  const hasGenuinelyNewStrongerWord = (
+    /** @type {{ level: number, word: string }[]} */ rewrittenHits,
+    /** @type {number} */ originalMaxLevel,
+    /** @type {string} */ rewrittenUnit,
+  ) => {
+    const unitGrams = charBigrams(normalizeForSimilarity(rewrittenUnit))
+    // 本改写句**实际覆盖**的原文单元（相似度达阈值）。
+    const coveredUnits = extractContentUnits(originalText).filter(
+      (ou) => containment(unitGrams, charBigrams(normalizeForSimilarity(ou))) >= NOVEL_UNIT_THRESHOLD,
     )
+    const coveredResponsibilityWords = new Set(
+      coveredUnits.flatMap((ou) => extractResponsibilityLevel(ou).hits.map((h) => h.word)),
+    )
+    return rewrittenHits.some(
+      (/** @type {{ level: number, word: string }} */ h) =>
+        h.level > originalMaxLevel &&
+        (!originalResponsibilityWords.has(h.word) || !coveredResponsibilityWords.has(h.word)),
+    )
+  }
 
   for (const pair of pairings) {
     const newResp = extractResponsibilityLevel(pair.rewritten)
@@ -3550,14 +3722,14 @@ export function verifyRewrite({ original, rewritten, claimedKeywords } = {}) {
     //      是把动作规整成简历惯用表述，既有用例锁定）；
     //      出现"主导层及以上"→ 判升格（凭空声称主导是更严重的夸大）。
     //   B) 最弱层被抬高（`参与` → `负责`）→ 判升格。
-    //   C) 仅最强层被抬高 → **必须**是"原文全篇没出现过的更强动词"才算，
-    //      否则只是把被合并那条原文里**本就存在**的强动词搬了过来。
+    //   C) 仅最强层被抬高 → **必须**是"该强动词不是从被合并的原文单元搬来的"
+    //      才算（见 hasGenuinelyNewStrongerWord 的说明）。
     const shouldFlag =
       oldResp.maxLevel === 0
         ? newResp.maxLevel >= LEADERSHIP_LEVEL
         : newResp.minLevel > oldResp.minLevel ||
           (newResp.maxLevel > oldResp.maxLevel &&
-            hasGenuinelyNewStrongerWord(newResp.hits, oldResp.maxLevel))
+            hasGenuinelyNewStrongerWord(newResp.hits, oldResp.maxLevel, pair.rewritten))
     if (shouldFlag) {
       // 报文用的层级：取改写句中"原文全篇未出现过"的最强职责词；
       // 若全部出现过（说明改的是位置而非强度），退回 maxLevel。
@@ -3629,6 +3801,87 @@ export function verifyRewrite({ original, rewritten, claimedKeywords } = {}) {
         '\n**请确认**：这是"合并条目时抬高了职责"（须改回），' +
         '还是"删掉了较弱的表述"（合法精简）？代码无法区分这两者，故不阻断导出。',
       evidence: mergeWatch.map((m) => m.from),
+    })
+  }
+
+  // ── 3c. 结构性头部行里的职责主张（**warn 级，不阻断交付**）────────────
+  //
+  // 【为什么单列（本轮独立审查抓出的静默放行）】
+  // 头部行（姓名/求职意向/联系方式行）被排除在内容单元之外，于是
+  // **既不在"整条新增"比对里、也不在逐对职责比对里**，而文档级兜底
+  // 又因正文能配对而关闭（`unitCoverage` 为真）——三处全空，完全静默：
+  //   `前端开发工程师 | 138-0000-0000 | dev@example.com`
+  //   → `独立主导前端架构 | 138-0000-0000 | dev@example.com`
+  // 同样一句话写进正文能被正常拦住，可见是结构性缺口而非刻意取舍。
+  //
+  // 【为什么取 warn 而非 error（刻意的产品判断）】
+  // 头部行是我们**主动要求模型补全**的位置（补姓名、补求职意向），
+  // 而"求职意向"本身就是**目标**而非**经历**——写"目标：独立主导架构设计"
+  // 在语义上未必是虚报经历。纯文本无法区分"描述目标"与"声称经历"，
+  // 故按歧义档处理：消除静默（审查的核心诉求），但不阻断交付。
+  const headerWatch = []
+  {
+    const originalHeaders = extractStructuralLines(originalText)
+    const rewrittenHeaders = extractStructuralLines(rewrittenText)
+    for (const header of rewrittenHeaders) {
+      const newResp = extractResponsibilityLevel(header)
+      // 头部未主张职责 → 与本项无关（补全联系方式/姓名的常见情形）
+      if (newResp.maxLevel === 0) continue
+      // 找到该改写头部行最相似的原文头部行（按行内相似度）
+      let best = 0
+      let bestHeader = ''
+      for (const oh of originalHeaders) {
+        const score = containment(
+          charBigrams(normalizeForSimilarity(header)),
+          charBigrams(normalizeForSimilarity(oh)),
+        )
+        if (score > best) {
+          best = score
+          bestHeader = oh
+        }
+      }
+      const oldResp = extractResponsibilityLevel(bestHeader)
+      // 无对应原文头部行（如原文没有求职意向行）→ 属补全，不报
+      if (bestHeader === '' || best < NOVEL_UNIT_THRESHOLD) continue
+      if (newResp.minLevel > oldResp.minLevel || newResp.maxLevel > oldResp.maxLevel) {
+        headerWatch.push({ from: bestHeader, to: header })
+      }
+    }
+  }
+  if (headerWatch.length > 0) {
+    findings.push({
+      code: 'POSSIBLE_HEADER_INFLATION',
+      severity: 'warn',
+      message:
+        `简历头部行（姓名/求职意向/联系方式）出现 ${headerWatch.length} 处职责强度抬升：\n  ` +
+        headerWatch.map((h) => `「${h.from}」→「${h.to}」`).join('\n  ') +
+        '\n头部行通常用于**求职意向**（描述目标而非经历），故代码无法判定这是' +
+        '虚报经历还是陈述目标，**不阻断导出**。**请人工确认**：' +
+        '若头部写的是自评/经历，须改回与原文一致的强度。',
+      evidence: headerWatch.map((h) => h.to),
+    })
+  }
+
+  // ── 3d. 被当作"表格表头"剥掉、却承载了编造的行（**warn 级**）──────────
+  //
+  // 【为什么需要（本轮独立审查抓出的静默放行）】
+  // 表头剥离用的是**否定式**判据（"不含数字/机构/专名/职责动词即视为表头"），
+  // 于是这类编造会被当表头删掉，两侧内容单元都为空 → 完全静默：
+  //   `| 增长中台 | 用户增长策略规划与落地 |` + `| --- | --- |`
+  // 四项特征全无 → 删除 → `ok=true`、`findings=[]`。
+  // 列名是开放集合（枚举必然滞后），故不改判据，只做兜底告警：
+  // 把"被剥掉且在原文找不到出处"的单元格报出来，交人确认。
+  const droppedHeaderCells = detectDroppedHeaderContent(originalText, rewrittenText)
+  if (droppedHeaderCells.length > 0) {
+    findings.push({
+      code: 'POSSIBLE_DROPPED_HEADER_CONTENT',
+      severity: 'warn',
+      message:
+        `有 ${droppedHeaderCells.length} 个单元格被当作表格表头剥离，但其内容在原文中` +
+        `找不到出处：${droppedHeaderCells.join('、')}。` +
+        '表头剥离用的是"不含事实主张特征"的否定式判据，无法区分"真列名"与' +
+        '"恰好不含这些特征的编造"。**请人工确认**：若它其实是内容而非列名，请删除或改回原文。',
+      evidence: droppedHeaderCells,
     })
   }
 
@@ -3997,6 +4250,46 @@ export function verifyRewrite({ original, rewritten, claimedKeywords } = {}) {
       evidence: softSurvivors,
     })
   }
+
+  // ── 7b. "已配对条目里夹带的新主张"（**warn 级，不阻断交付**）────────────
+  //
+  // 【为什么需要（本轮独立审查抓出的静默放行）】
+  // 第 7 项的整条新增检测按**整条相似度**判定，于是"在已配对的条目尾部
+  // 追加一句主张"会因相似度很高而被视为同一条，**不进 novel 集合**：
+  //   `- 参与商品列表页的开发工作；`
+  //   → `- 参与商品列表页的开发工作，保证零故障；`
+  // 而"保证零故障"既无数字、又无机构名、又无技术专名、又无职责动词词表内的词
+  // → 四个检查全部不命中 → `ok=true`、`findings=[]`。
+  // 同理"复制一条原文并把宾语换掉"（`商品列表页` → `用户列表页`）也被静默放过。
+  //
+  // ── 7b. 已配对条目里夹带的新主张 —— **本轮尝试后放弃，属已声明边界** ──────
+  //
+  // 【为什么在这里留下一段说明而不是一段代码】
+  // 审查确认存在这条静默通道（`- 参与商品列表页的开发工作；`
+  // → `- 参与商品列表页的开发工作，保证零故障；`：尾部多出的主张
+  // 既无数字、又无机构/专名、又无词表内职责动词，四个检查全不命中）。
+  //
+  // 我实现了两版判据，**两版都被实测否决**，故不落代码：
+  //   第一版：拿改写句的每个"连续汉字段"去原文里 indexOf。
+  //     中文句子整句就是一个连续汉字段 → 整段都能在原文找到 → 判据失效
+  //     （`NEW-2` 仍然漏报）。
+  //   第二版：反复剔除与原文的最长公共汉字片段，看残留是否 ≥4 字。
+  //     能抓住 `保证零故障`，但**同时抓住了合法改写**：
+  //       `参与商品列表页的开发工作` → `负责商品列表页的核心模块开发工作`
+  //       残留是「核心模块」（原文没有这 4 字）
+  //       `使用 Vue2 编写主要展示页面` → `使用 Vue2 完成主要展示页面的编写`
+  //       残留是「的编写」导致的错位片段
+  //     实测它把项目自身的"干净通过"用例打红（2 项既有测试失败）。
+  //
+  // 结论：**"新增主张"与"换一种说法"在纯文本层面不可分离**，这与本项目
+  // 在别处反复得出的结论同源。给每个合法改写都发一条 warn，等于把告警
+  // 变成常亮噪声——而"一个频繁误报的守卫会被直接忽略，比没有守卫更糟"
+  // 是文件头写明的设计原则。
+  //
+  // 故**不修**，作为已知边界如实声明（见 `GUARD_LIMITATIONS` 末条），
+  // 而不是用一个会误伤的判据假装堵住。若将来要修，方向应是
+  // 语义级判断（需模型参与），而非继续堆文本启发式。
+
 
   const hasError = findings.some((f) => f.severity === 'error')
 
