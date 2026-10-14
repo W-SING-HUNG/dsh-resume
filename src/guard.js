@@ -35,7 +35,7 @@
  */
 export const GUARD_LIMITATIONS = [
   '只检测带强后缀的机构名（某某公司/大学/银行…）与拉丁专名；无后缀的机构名（如「字节跳动」）无法可靠识别，需人工确认。',
-  '数字按 token 比对，不做语义判断：把「提升 40%」改成「提升四成」不会被发现。',
+  '数字按 token 比对，不做语义判断：把「提升 40%」改成「提升四成」（或「提升两倍」）能被归一化为同一数值，故这类等价改写会放行；但**语义等价而数值不同**的写法仍不判定（如把「提升 40%」写成「提升了近一半」）。汉字数字（含大写「壹佰」）与阿拉伯数字同等参与比对。',
   '职责升格按「改写单元 ↔ 原文单元」配对逐对比较，且基于**动词词表**（中英各一份：中文 `了解/参与/负责/主导/统筹` 等，英文 `learned/participated/completed/led/decided` 等）：措辞避开词表的同义升格**中英都会漏检**（中文如「参与」→「操盘/掌舵/扛起」，英文如 `supported` → `championed/pioneered/transformed`）。词表判据的固有性质——枚举"哪些算升格"必然滞后，与本文件其它处改枚举为结构判据的教训同源。与原文任何单元都配不上的改写行不参与这一项（整条新增由第 7 项负责，仅当它同时主张了主导层职责时才补充报出）。',
   '整条新增检测按字级相似度判定（阈值校准为 0.25）：与原文任何条目都无重合的内容会被报出；但"把原有经历改写得面目全非"可能被误报为新增，需人工确认。',
   '逐条比对只覆盖长度 ≥ 8 字的内容单元，标题与姓名等短行不参与（短行相似度噪声大，会制造误报）。',
@@ -51,9 +51,33 @@ export const GUARD_LIMITATIONS = [
   '**英文简历的"缩写 ⇄ 全称"识别三类形态**：① **逐词首字母**：`JVM ⇄ Java Virtual Machine`、`SQL ⇄ Structured Query Language`；② **词内大写**：`HTTP ⇄ HyperText Transfer Protocol`（HyperText 贡献 H 与 T）；③ **数字式**：`K8s ⇄ Kubernetes`、`i18n ⇄ internationalization`（首字母 + 中间字母数 + 尾字母，判据可验证）。三者都报"建议检查"而不阻断。**唯一覆盖不到、会判"必须修正"（已知边界）**：**词内取字母型**如 `REST` = **R**epresentational State Transfer（`E` 取自词内而非任何词首）——它与"普通单词恰好首字母拼成同一串"（如 `Java` → `JAVA`）在纯文本上无法区分，放宽会放过 `Java → Java Virtual Machine`（那确实新增了 JVM 主张）。遇到这类时，请保留缩写写法本身（`Built REST APIs` 原样不动），不要改写成全称。',
   '**在已配对的条目里"夹带"一小段中文主张不会被发现**（已知边界，经两版实现尝试后确认无法用文本判据解决）：整条新增检测按**整条相似度**判定，于是 `- 参与商品列表页的开发工作；` → `- 参与商品列表页的开发工作，保证零故障；` 里多出的「保证零故障」若不含数字/机构名/技术专名/词表内职责动词，四个检查全不命中；把原条目复制一条并换掉宾语（`商品列表页` → `用户列表页`）同理。修它需要区分"新增主张"与"换一种说法"，而**纯文本层面二者不可分离**——实测两版判据（整段 indexOf / 反复剔除最长公共汉字片段）都会把项目自身的合法改写（`参与…开发工作` → `负责…核心模块开发工作`，残留「核心模块」）判为可疑，给每条合法改写都发告警等于让告警常亮、反而使守卫被忽略。故如实声明而不假装堵住。',
   '本校验只做文本特征比对，不判断内容是否真实。它拦得住"与原文对不上"的编造，拦不住"原文本身就写了假的"。',
+  '**汉字数字只覆盖常见数量写法**：小写/大写个位与十/百/千/万/亿、`百分之X`、`X成`、`X倍`、`近/约/余` 前缀均可解析；但"语义等价而数值不同"的写法仍不判定（如「提升四成」↔「提升了近一半」、「约五万」↔「五万上下」），分数式（`三分之一`）与部分约数连读（`三五人`）也不视为量化主张。',
+  '**相对时间只认带"前"的过去指向形态**（`三年前`/`5个月前`/`两年之前`）。`以内`/`以来`/`至今`/`一年多前` 等不在检测范围；且只拦**改写侧新增**的相对时间，两侧都有的时间表达改动按绝对日期的既有判据处理。',
+  '**程度副词只收高层动词前的固定几种**（`全权/全面/独自/亲自/独立` + `负责/主导/统筹/牵头/主持/主责/承担/管理/决策`）。词表外的强度修饰（如「深度参与」「扛起」「操盘」）不检测——与职责升格同源，枚举必然滞后；认知层动词（`了解`/`熟悉`）刻意不纳入，因为「全面了解」属常规润色，纳入会制造大量误报。',
+  '**表格兜底告警为 warn 级**：整张表的单元格若全部"无事实特征且原文找不到出处"，报 `POSSIBLE_DROPPED_HEADER_CONTENT` 但不阻断导出。只要任一格含数字/机构/技术专名/职责动词，即视为"把真实内容表格化"的正常排版而不报——因此特征缺失的短格编造只能提示、无法确证。',
 ]
 
 /** 守卫版本。判定规则变化时递增，便于回溯误报/漏报。 */
+// 1.4.0：第二轮"静默放行"独立对抗审查（目标单一：只找编造却 ok=true、
+//   findings=[]）。交付 4 类，**每一类都由维护者在父侧独立复现确认后才修**：
+//     【一】中文数字量化主张（含大写）此前**整段跳过**——`extractNumericTokens`
+//       只匹配 `\d`，于是 `服务五万用户`、`营收壹佰万元`、`捌仟条数据` 全部静默。
+//       新增中文数字/数量级解析；`百分之X` 与 `四成`/`两倍` 归一到与阿拉伯写法
+//       同值。**注意**：这同时解除了 1.3.0 声明中的第 2 条局限
+//       （"提升 40% 改成四成不会被发现"）——该声明已同步改写。
+//     【二】相对时间替换绝对日期：`2022年参与…` → `三年前参与…` 静默
+//       （原文年份被日期检查收走，"三年前"不产出任何 token）。
+//       新增 extractRelativeTimeTokens，**两个方向都拦**（模型无从知道当前日期，
+//       把"三年前"硬写成"2022年"与凭空写"2022年"等价）。
+//     【三】程度副词抬升职责：`负责` → `全权负责`、`主导` → `全面主导`
+//       层级未变故静默，但责任边界不同，属事实性夸大。只对**高层动词**生效
+//       （认知层"全面了解"是常规润色，纳入会制造误报）。
+//     【四】表格短单元格编造：表头剥离（跳过 < 6 字格）+ 数据行 < 8 字豁免
+//       两个判据叠加出缝隙（`| 领域 | 专长 |` + `| 增长 | 策略 |` 全静默）。
+//       补"整表皆无出处"的兜底告警（warn，不阻断），任一格含事实特征即不报。
+//   修完 4 类后跑完整回归，**当场打红 3 项既有用例**（`8 万` 被多算一个 10000、
+//   `第一页/共两页` 被当数量）——已修并补"非数量语境"反向锁定用例。
+//   测试 451 → **461**（每类都配"必须拦"与"必须放"两组）。
 // 1.3.0：本版含两类实质变更，均来自"新增语料 + 独立对抗审查"的实测。
 //   【一】修一处**误报**（用户拿不到文件）：英文简历做 ATS 对齐
 //     （`Google Analytics (GA)`，含缩写在前形态）被判"新增技能"而拒绝导出，
@@ -79,7 +103,7 @@ export const GUARD_LIMITATIONS = [
 //   · 容量单位大小写：新增 UNIT_CASE_CHANGED（原来完全静默）
 //   · 职责升格：下推到内容单元级（原来按全文 min/max，双向都错）
 //   · 自证清白：拆为 equal/contains 两档并分别处理（原来会误伤合法改写）
-export const GUARD_VERSION = '1.3.0'
+export const GUARD_VERSION = '1.4.0'
 
 /**
  * 中文机构名后缀。用于识别"改写后新出现的机构"。
@@ -1148,6 +1172,46 @@ export function extractDateTokens(text) {
 }
 
 /**
+ * 提取文本里的**相对时间表达**（`三年前`、`5个月前`、`两年前`）。
+ *
+ * 【为什么需要（本轮独立审查抓出的静默放行）】
+ * 改写把**绝对日期换成模糊相对时间**时，`extractDateTokens` 抓不到任何"日期"：
+ *   `2022年参与商品列表页的开发工作；` → `三年前参与商品列表页的开发工作；`
+ * 原文 `2022` 被日期检查收走；改写的 `三年前` 不产出日期 token →
+ * 日期差集为空、数字也无新增 → `ok=true`、`findings=[]`，**完全静默**。
+ * 而把时间点改模糊是**事实弱化**：模型无从知道"现在"，凭空断言"三年前"
+ * 与凭空断言"2022年"同样不可信。
+ *
+ * 归一化：中文数字 → 阿拉伯（`三年前` ≡ `3年前`），使两种写法可比对。
+ * 只有"前/以前/之前"的**过去指向**形态；`以内/以来/至今`等不在此列
+ * （那是时长或未来指向，语义不同，不归日期改动检查）。
+ *
+ * @param {string} text 待提取文本
+ * @returns {Set<string>} 归一化后的相对时间 token（`3年前`、`5月前`）
+ */
+export function extractRelativeTimeTokens(text) {
+  const out = new Set()
+  const src = normalizeText(text)
+  if (src === '') return out
+  const re =
+    /(\d+|[〇零一二两三四五六七八九壹贰叁肆伍陆柒捌玖十拾百佰千仟万亿][〇零一二两三四五六七八九壹贰叁肆伍陆柒捌玖十拾百佰千仟万亿余]*)\s*(?:个)?(年|月|周|天|日)\s*(?:之?前|以前|之前)/g
+  for (const m of src.matchAll(re)) {
+    const numStr = m[1]
+    const unit = m[2]
+    let value
+    if (/\d/.test(numStr)) {
+      value = String(Number(numStr))
+    } else {
+      const v = parseChineseNumeral(numStr)
+      if (v === null) continue
+      value = String(v)
+    }
+    out.add(`${value}${unit}前`)
+  }
+  return out
+}
+
+/**
  * 回验"声称覆盖的关键词"是否真的出现在改写结果里。
  *
  * 【为什么需要】
@@ -2006,12 +2070,19 @@ export function detectDroppedHeaderContent(original, rewritten) {
   if (headerRows.size === 0) return []
   const originalFlat = normalizeForSimilarity(normalizeText(original))
   const out = []
-  for (const i of headerRows) {
-    const cells = lines[i]
+  const cellsOf = (/** @type {string} */ l) =>
+    l
       .replace(/^\s*\||\|\s*$/g, '')
       .split('|')
       .map((c) => c.trim())
       .filter(Boolean)
+  const hasFactualFeature = (/** @type {string} */ l) =>
+    /\d/.test(l) ||
+    extractChineseOrgNames(l).size > 0 ||
+    extractLatinProperNouns(l).size > 0 ||
+    extractResponsibilityLevel(l).maxLevel > 0
+  for (const i of headerRows) {
+    const cells = cellsOf(lines[i])
     for (const cell of cells) {
       const cellFlat = normalizeForSimilarity(cell)
       // 只关心含汉字且有一定长度的单元格（英文列名/短标签属常规表头）
@@ -2019,6 +2090,43 @@ export function detectDroppedHeaderContent(original, rewritten) {
       if (originalFlat.includes(cellFlat)) continue
       // 该单元格的汉字内容与原文无实质重合 → 疑似编造被当表头剥掉
       if (longestSharedHanSubstring(cellFlat, originalFlat) < 4) out.push(cell)
+    }
+  }
+
+  // ── 第二遍：整表检查（表头 + 其后的数据行）────────────────────────────
+  //
+  // 【为什么必须补这一遍（本轮独立审查抓出的静默放行）】
+  // 上面按**单元格**检查，且跳过长度 < 6 的格子；而数据行拍平后若 < 8 字，
+  // 又进不了内容单元比对（`extractContentUnits` 的阈值）。两个判据叠加出缝隙：
+  //   `| 领域 | 专长 |` + `| --- | --- |` + `| 增长 | 策略 |`
+  // 逐格看每格都短得像列名，合起来却是一整条编造主张，且全程零告警。
+  //
+  // 【判据必须"全表皆无出处"才报（严防误报）】
+  // 只要**任何一格**含事实主张特征（数字/机构/技术专名/职责动词，如测试中
+  // `| 商品列表页 | 参与开发 |` 的「参与」），或能在原文中找到出处，
+  // 就认为这是"把真实内容表格化"的正常排版，不报。
+  // 全部命中才报，且只报 warn —— 兜底消除静默，不阻断交付。
+  for (const i of headerRows) {
+    const cells = []
+    for (let j = i; j < lines.length; j += 1) {
+      if (!isTableRow(lines[j])) break
+      if (isSeparatorRow(lines[j])) continue
+      cells.push(...cellsOf(lines[j]))
+    }
+    if (cells.length < 2) continue
+    const allUntraceable = cells.every((cell) => {
+      if (hasFactualFeature(cell)) return false
+      const cellFlat = normalizeForSimilarity(cell)
+      if (cellFlat === '') return true
+      return (
+        !originalFlat.includes(cellFlat) &&
+        longestSharedHanSubstring(cellFlat, originalFlat) < 2
+      )
+    })
+    if (allUntraceable) {
+      for (const cell of cells) {
+        if (!out.includes(cell)) out.push(cell)
+      }
     }
   }
   return out
@@ -2156,6 +2264,68 @@ function applyMagnitude(digits, unit) {
 }
 
 /**
+ * 中文数字（含大写）字面值。
+ *
+ * 【为什么需要（本轮独立审查抓出的静默放行）】
+ * `extractNumericTokens` 原先只匹配 `\d`，于是**汉字数字整段跳过**：
+ *   `- 参与商品列表页的开发工作；` → `…，服务五万用户；`
+ *   `- 负责营收工作；` → `…，实现营收壹佰万元；`
+ * `extractNumericTokens` 两侧都抽出空集 → `ok=true`、`findings=[]`，
+ * **凭空新增的量化主张完全静默**——这正是本项目存在理由要拦的核心编造。
+ *
+ * 覆盖小写（`五万`）与大写（`壹佰`/`捌仟`）两套写法。
+ * 大写数字在简历里少见但正是编造者规避检查的写法，故必须覆盖。
+ */
+const ZH_NUM_DIGITS = /** @type {Record<string, number>} */ ({
+  〇: 0, 零: 0,
+  一: 1, 二: 2, 两: 2, 三: 3, 四: 4, 五: 5, 六: 6, 七: 7, 八: 8, 九: 9,
+  壹: 1, 贰: 2, 叁: 3, 肆: 4, 伍: 5, 陆: 6, 柒: 7, 捌: 8, 玖: 9,
+})
+
+/** 中文数量级字 → 倍率（万亿为节级，十百千为节内级）。 */
+const ZH_NUM_MAGN = /** @type {Record<string, number>} */ ({
+  十: 10, 拾: 10, 百: 100, 佰: 100, 千: 1000, 仟: 1000, 万: 1e4, 亿: 1e8,
+})
+
+/**
+ * 把一段中文数字串解析为整数（`五万` → 50000、`壹佰贰拾叁` → 123、`十余万` → 100000）。
+ *
+ * 规则与习惯读法一致：节内按 十/百/千 累乘，遇 万/亿 进节并累计。
+ * `余`（`十余万`）视为分隔符忽略——约数的值不精确，但取主值参与比对
+ * 足够区分"有无该量化主张"；`近/约/超` 等前缀不在字符集内，天然被切掉。
+ *
+ * @param {string} s 仅含中文数字/数量级/余 的串
+ * @returns {number | null} 解析出的整数值；含无法识别的字符时返回 null
+ */
+function parseChineseNumeral(s) {
+  let total = 0
+  let section = 0
+  let number = 0
+  for (const ch of s) {
+    if (ch === '余') continue
+    const digit = ZH_NUM_DIGITS[ch]
+    if (digit !== undefined) {
+      number = digit
+      continue
+    }
+    const magn = ZH_NUM_MAGN[ch]
+    if (magn === undefined) return null
+    if (magn < 1e4) {
+      // `十` 前无数字时按"一十"处理（`十万` = 100000）
+      section += (number === 0 ? 1 : number) * magn
+      number = 0
+    } else {
+      // `万`/`亿` 前什么都没有（`近万`、`上亿`）按"一"处理，否则会算出 0
+      section = (section === 0 && number === 0 ? 1 : section + number) * magn
+      total += section
+      section = 0
+      number = 0
+    }
+  }
+  return total + section + number
+}
+
+/**
  * 提取文本中的数字 token（含全角数字）。
  *
  * 归一化规则：全角转半角、去掉千分位逗号、去掉尾部小数点、
@@ -2271,6 +2441,79 @@ export function extractNumericTokens(text) {
   let maskedUnits = masked
   for (const frag of unitConsumed) {
     maskedUnits = maskedUnits.replace(frag, ' ')
+  }
+
+  // ── 中文数字量化主张（含大写）────────────────────────────────────
+  //
+  // 【存在理由】见 ZH_NUM_DIGITS 的说明：汉字数字此前整段跳过，
+  // 凭空新增"服务五万用户 / 营收壹佰万元"完全静默。
+  //
+  // 【收窄条件（防误报，两条满足其一才收录）】
+  // 汉字数字在中文里也大量用于**非数量**语境（`唯一`、`进一步`、`统一`），
+  // 见一个收一个会把正常措辞变成"新增数字"噪声。故只收录：
+  //   ① 短语内含**数量级字**（十/百/千/万/亿）——`五万`、`壹佰`；或
+  //   ② 紧跟**量词/成/倍**——`三个`、`四成`（= 40%，与阿拉伯 `40%` 同值）、
+  //      `两倍`。`唯一`、`进一步`、`一致` 的「一」两条件都不满足，不收。
+  // 已知残余边界：`三五人`（约数连读）会被解析成 8——
+  // 简历极少出现该写法，且两侧写法相同时比对相等，不构成静默通道。
+  //
+  // `百分之X` 先单独处理：X 与阿拉伯 `X%` 同值（`百分之四十` → 40），
+  // 否则「百」会被当成 100 制造误报（`40%` → `百分之四十` 反而报"多出 100"）。
+  // 字符集必须同时含**大写数量级**（`佰/仟/拾`），且允许**以数量级开头**
+  // （`十万`、`佰万`）。早期只认"个位数字开头 + 小写数量级"，
+  // 于是 `壹佰万元` 与 `十万` 仍被整段跳过——修了一半。
+  const ZH_NUM_CHARS =
+    '〇零一二两三四五六七八九壹贰叁肆伍陆柒捌玖十拾百佰千仟万亿余'
+  const zhSrc = masked.replace(
+    new RegExp(`百分之([${ZH_NUM_CHARS}]+)`, 'g'),
+    (_full, num) => {
+      const v = parseChineseNumeral(num)
+      if (v !== null) out.add(String(v))
+      return ' '
+    },
+  )
+  const ZH_NUM_FOLLOWERS = new Set([
+    ...'名个项人次条份页台款套篇张笔家所门种类元块户例场轮版期组批宗单桩起天周',
+  ])
+  for (const m of zhSrc.matchAll(new RegExp(`[${ZH_NUM_CHARS}]+`, 'g'))) {
+    const run = m[0]
+    // ── 排除"孤立数量级"run（`8 万用户` 里作为后缀的 `万`）──────────
+    //
+    // 【为什么必须排除（我引入的回归，测试当场打红）】
+    // 中文数量级 `万/亿` 在小写形态下**本身就是汉字**，于是
+    // `服务 8 万用户` 会被切成 `8`（阿拉伯规则）**与** `万`（中文规则），
+    // 而"万前无数字按一算"让 `万` → 10000 → 凭空多一个数字 →
+    // 合法的"8万 → 80000"被判 FABRICATED_NUMBER。
+    //
+    // 【但"隐含 1 的数量级"必须保留（否则漏掉真编造）】
+    // `近万`、`上亿`、`十万` 里的 `万/亿/十` 前是**非数字**，
+    // 语义上等于"一万/一亿/十万"，是真实的数量主张，不能一起丢。
+    // 故判据是：**前一个非空白字符是数字**时，该数量级只是后缀，跳过。
+    const prevChar = zhSrc.slice(0, m.index).replace(/\s+$/, '').slice(-1)
+    if (/^[十拾百佰千仟万亿余]+$/.test(run) && /[\d.]/.test(prevChar)) continue
+    // ── 排除序数/页码语境（`第一页`、`共两页`）──────────────────────
+    //
+    // 【为什么必须排除】`第` 后面跟的是**序数**（第 1 页/第一页），
+    // 页码里的数字是纯排版；中文写法若被当成"数量主张"，就会出现
+    // `（本页为第一页，共两页）` → FABRICATED_NUMBER 的误报（实测打红）。
+    if (prevChar === '第') continue
+    const value = parseChineseNumeral(run)
+    if (value === null) continue
+    const next = zhSrc[m.index + run.length] ?? ''
+    // 页码（`共两页`、`第一页`）：页数属纯排版，不是量化主张
+    if (next === '页') continue
+    if (next === '成') {
+      // `四成` = 40%，与阿拉伯写法 `40%` 归一到同一值
+      out.add(String(value * 10))
+      continue
+    }
+    if (/[十拾百佰千仟万亿]/.test(run)) {
+      out.add(String(value))
+      continue
+    }
+    if (next === '倍' || ZH_NUM_FOLLOWERS.has(next)) {
+      out.add(String(value))
+    }
   }
 
   // 数字主体：允许小数与千分位；其后可紧跟数量级词。
@@ -3630,6 +3873,9 @@ export function verifyRewrite({ original, rewritten, claimedKeywords } = {}) {
   /** 改写后新出现的职责主张（原文无对应单元） */
   /** @type {Array<{ to: string, rewrittenWeakest: string[] }>} */
   const inflatedNovel = []
+  /** 程度副词导致的职责强度抬升（`负责` → `全权负责`）：层级未变但事实强化 */
+  /** @type {Array<{ from: string, to: string }>} */
+  const inflatedAdverbs = []
 
   const pairings = matchUnitsToOriginal(originalText, rewrittenText)
   // 原文**全篇**出现过的职责动词。用于：
@@ -3716,6 +3962,32 @@ export function verifyRewrite({ original, rewritten, claimedKeywords } = {}) {
       continue
     }
     const oldResp = extractResponsibilityLevel(pair.original)
+
+    // ── 3x1. 程度副词导致的职责强度抬升（本轮独立审查抓出的静默放行）──
+    //
+    // 【缺陷】`负责…` → `全权负责…`、`主导…` → `全面主导…` ——词表只查
+    // **动词本身**，`全权/全面/独自/亲自` 这种增强修饰被完全忽略，层级相同
+    // → 静默放行。但"全权负责"与"负责"在法律责任边界上是两回事，
+    // 属事实性夸大，必须拦。
+    //
+    // 【收窄：只针对高层动词前的程度副词】
+    // 认知层（了解/熟悉）是开放程度描写，"全面了解"不代表掌握了更多——
+    // 列进去会误伤简历常规润色。只对"负责/主导/统筹/牵头/主持/主责/承担/
+    // 管理/决策"这类有明确权限语义的动词生效。
+    const ADV_ELEVATION_RE =
+      /(?:全权|全面|独自|亲自|独立)(?:负责|主导|统筹|牵头|主持|主责|承担|管理|决策)/
+    const adverbMatches = pair.rewritten.match(ADV_ELEVATION_RE) ?? []
+    if (adverbMatches.length > 0 && !inflatedAdverbs.some((ia) => ia.to === pair.rewritten)) {
+      // 原句必须含同一动词（否则是换词，已有别的判据处理）；
+      // 且原句不含相同副词组合。
+      const originalHasVerb = oldResp.maxLevel > 0
+      const originalHasAdverb = /(?:全权|全面|独自|亲自|独立)\s*(?:负责|主导|统筹|牵头|主持|主责|承担|管理|决策)/.test(
+        pair.original,
+      )
+      if (originalHasVerb && !originalHasAdverb) {
+        inflatedAdverbs.push({ from: pair.original, to: pair.rewritten })
+      }
+    }
     // 判定分三种情形（不放松既有检测）：
     //   A) 原文该句**无任何职责动词**（maxLevel === 0）：
     //      只写到"负责层"→ 放行（`商品列表开发` → `负责商品列表开发`
@@ -3885,7 +4157,12 @@ export function verifyRewrite({ original, rewritten, claimedKeywords } = {}) {
     })
   }
 
-  if (inflatedPairs.length > 0 || inflatedNovel.length > 0 || docLevelInflation) {
+  if (
+    inflatedPairs.length > 0 ||
+    inflatedNovel.length > 0 ||
+    inflatedAdverbs.length > 0 ||
+    docLevelInflation
+  ) {
     /** @type {string[]} */
     const details = []
     /** @type {string[]} */
@@ -3909,6 +4186,10 @@ export function verifyRewrite({ original, rewritten, claimedKeywords } = {}) {
     for (const n of inflatedNovel) {
       details.push(`新增主张「${n.rewrittenWeakest.join('、')}」：${n.to}`)
       evidence.push(...n.rewrittenWeakest)
+    }
+    for (const a of inflatedAdverbs) {
+      details.push(`「${a.from}」→「${a.to}」：同动词加程度副词属职责强度抬升，必须改回原表述`)
+      evidence.push(a.to)
     }
     if (docLevelInflation) {
       const from = RESPONSIBILITY_LEVELS.find((t) => t.level === originalResp.maxLevel)
@@ -3988,6 +4269,29 @@ export function verifyRewrite({ original, rewritten, claimedKeywords } = {}) {
         `改写后出现原文没有的时间点：${changedDates.join('、')}。` +
         '起止日期属于事实字段，不得改动。',
       evidence: changedDates,
+    })
+  }
+
+  // ── 4b. 相对时间表达（把绝对日期改模糊，同为事实弱化）───────────────
+  //
+  // 【为什么需要（独立审查抓出的静默放行）】
+  // `2022年参与…` → `三年前参与…` 时，`extractDateTokens` 两侧都无新日期，
+  // 于是差集为空、完全静默。这里补一道：**改写侧新增**的相对时间即拦。
+  // 注意**两个方向都要拦**：`三年前 → 2022年` 同样编造——模型无从知道
+  // 相对时间换算出的真实年份，把"三年前"硬写成"2022年"与凭空写"2022年"
+  // 等价。真正放行的只有"两侧相对时间不变/绝对日期不变"的等值改写。
+  const originalRelTime = extractRelativeTimeTokens(originalText)
+  const rewrittenRelTime = extractRelativeTimeTokens(rewrittenText)
+  const newRelTime = [...rewrittenRelTime].filter((t) => !originalRelTime.has(t))
+  if (newRelTime.length > 0) {
+    findings.push({
+      code: 'FABRICATED_DATE',
+      severity: 'error',
+      message:
+        `改写后出现原文没有的相对时间表达：${newRelTime.join('、')}。` +
+        '模型无从知道当前日期，把具体年份改成"X年前"是在**凭空断言时间**；' +
+        '请改回原精确的时间点。',
+      evidence: newRelTime,
     })
   }
 

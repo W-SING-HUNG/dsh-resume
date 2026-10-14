@@ -19,6 +19,7 @@ import {
   extractContentUnits,
   extractResponsibilityLevel,
   extractDateTokens,
+  extractRelativeTimeTokens,
   verifyKeywordCoverage,
   detectNovelUnits,
   detectSelfAttestation,
@@ -3557,5 +3558,209 @@ describe('守卫：自证清白判定（S1-3，交付关依赖它）', () => {
   test('空输入不判为自证清白（由调用方按"未提供原文"处理）', () => {
     assert.equal(detectSelfAttestation('', ORIGINAL).selfAttested, false)
     assert.equal(detectSelfAttestation(ORIGINAL, '').selfAttested, false)
+  })
+})
+
+// ═══════════════════════════════════════════════════════════════════════
+// 第三十七轮：第二轮"静默放行"独立对抗审查（4 类，全部先复现后修复）
+// ═══════════════════════════════════════════════════════════════════════
+//
+// 【为什么单独成组】本轮的审查目标**单一**——只找"编造却 ok=true、
+// findings=[]"（第三十五轮验证过：目标单一比"全面审查"产出高得多）。
+// 交付 4 类，每一类都由我在父侧**独立复现确认后才修**（不采信报告结论）。
+// 每一类都配"必须拦"与"必须放"两组用例——本项目多轮教训：只测一侧必然漂移。
+describe('守卫：静默放行修复（中文数字 / 相对时间 / 程度副词 / 表格短格）', () => {
+  // ── 1. 中文数字量化主张（含大写）──────────────────────────────────
+  //
+  // 【缺陷】`extractNumericTokens` 原先只匹配 `\d`，汉字数字**整段跳过**：
+  //   `- 参与商品列表页的开发工作；` → `…，服务五万用户；`
+  // 两侧数字集合都是空的 → `ok=true`、`findings=[]`，凭空新增的量化主张
+  // 完全静默。注意这与 GUARD_LIMITATIONS 第 2 条（"40% → 四成"不判定）
+  // **不同**：那是"已有数字换写法"，这是"原文没有、凭空新增"。
+  test('凭空新增中文数字量化主张必须拦下（含大写与约数）', () => {
+    const O = '- 参与商品列表页的开发工作；'
+    for (const fab of [
+      '服务五万用户',
+      '服务壹万用户',
+      '处理捌仟条数据',
+      '服务近十万用户',
+      '服务十余万用户',
+      '营收壹佰贰拾叁万元',
+      '性能提升四成',
+      '性能提升两倍',
+    ]) {
+      const report = verifyRewrite({ original: O, rewritten: `${O}${fab}；` })
+      assert.equal(report.ok, false, `凭空新增的量化主张必须拦下：${fab}`)
+      assert.ok(
+        report.findings.some((f) => f.code === 'FABRICATED_NUMBER'),
+        `必须报 FABRICATED_NUMBER：${fab}`,
+      )
+    }
+  })
+
+  test('中文数字与阿拉伯数字的等价写法必须放行（不得误拦）', () => {
+    for (const [original, rewritten] of [
+      ['- 服务五万用户；', '- 服务 50000 用户；'],
+      ['- 服务 50000 用户；', '- 服务五万用户；'],
+      ['- 服务十余万用户；', '- 服务 100000 用户；'],
+      ['- 性能提升四成；', '- 性能提升 40%；'],
+      ['- 性能提升两倍；', '- 性能提升 2 倍；'],
+      ['- 营收壹佰万元；', '- 营收 1000000 元；'],
+    ]) {
+      const report = verifyRewrite({ original, rewritten })
+      assert.deepEqual(
+        report.findings.filter((f) => f.severity === 'error').map((f) => f.code),
+        [],
+        `中文/阿拉伯等价写法不得报错：${original} → ${rewritten}`,
+      )
+    }
+  })
+
+  test('汉字数字的常规非数量用法不得被误报（唯一/进一步/三分之一）', () => {
+    // 【反向锁定的必要性（实测打红过三次）】汉字数字在中文里大量用于
+    // 非数量语境；见一个收一个会把正常措辞变成"新增数字"噪声：
+    //   ① `8 万` 里孤立的 `万` 曾被当成 10000（数量级不能单独成数）
+    //   ② `第一页`/`共两页` 是**页码**（纯排版）曾被当成数量
+    //   ③ `唯一`/`进一步`/`三分之一` 的「一」不是量化主张
+    for (const [original, rewritten] of [
+      ['- 唯一需要注意的是兼容性；', '- 唯一需要注意的是兼容性问题；'],
+      ['- 进一步优化了页面性能；', '- 进一步优化了页面的加载性能；'],
+      ['- 完成三分之一的工作；', '- 完成了三分之一的工作量；'],
+      ['- 服务 8 万用户；', '- 服务 80000 用户；'],
+      ['- 商品 1.2 万个；', '- 商品 12000 个；'],
+      // 页码是独立行，两侧写法不同都不得判为编造数字
+      ['- 参与登录模块的开发工作；\n第 1 页 共 2 页', '- 参与登录模块的开发工作；\n第 1 页，共 2 页'],
+    ]) {
+      const report = verifyRewrite({ original, rewritten })
+      assert.deepEqual(
+        report.findings.filter((f) => f.severity === 'error').map((f) => f.code),
+        [],
+        `非数量语境的汉字数字不得误报：${original} → ${rewritten}`,
+      )
+    }
+  })
+
+  test('说理性旁注里的页码中文写法不得被误判为编造', () => {
+    // 端到端回归锁定：`normalizeText` 已剥阿拉伯页码行，
+    // 中文页码（`第一页`/`共两页`）也必须同等对待，否则是"用户拿不到文件"。
+    const O = '- 参与登录模块的开发工作；\n'
+    const report = verifyRewrite({ original: O, rewritten: `${O}（本页为第一页，共两页）\n` })
+    assert.deepEqual(
+      report.findings.filter((f) => f.severity === 'error').map((f) => f.code),
+      [],
+      '中文页码是排版，不得判为编造数字',
+    )
+  })
+
+  // ── 2. 相对时间替换绝对日期 ───────────────────────────────────────
+  //
+  // 【缺陷】`2022年参与…` → `三年前参与…`：原文 2022 被日期检查收走，
+  // 改写的"三年前"不产出日期 token → 差集为空 → 完全静默。
+  test('把绝对日期改成相对时间必须拦下（两个方向都算编造）', () => {
+    for (const [original, rewritten] of [
+      ['- 2022年参与商品列表页的开发工作；', '- 三年前参与商品列表页的开发工作；'],
+      ['- 三年前参与商品列表页的开发工作；', '- 2022年参与商品列表页的开发工作；'],
+      ['- 参与商品列表页的开发工作；', '- 三年前参与商品列表页的开发工作；'],
+      ['- 2022年参与开发；', '- 五年前参与开发；'],
+    ]) {
+      const report = verifyRewrite({ original, rewritten })
+      assert.equal(report.ok, false, `时间点被改动必须拦下：${original} → ${rewritten}`)
+      assert.ok(
+        report.findings.some((f) => f.code === 'FABRICATED_DATE'),
+        `必须报 FABRICATED_DATE：${original} → ${rewritten}`,
+      )
+    }
+  })
+
+  test('相对时间写法归一化：中文与阿拉伯等价，不变则放行', () => {
+    assert.deepEqual([...extractRelativeTimeTokens('三年前参与开发')], ['3年前'])
+    assert.deepEqual([...extractRelativeTimeTokens('3年前参与开发')], ['3年前'])
+    assert.deepEqual([...extractRelativeTimeTokens('十个月前参与开发')], ['10月前'])
+    for (const text of [
+      '- 三年前参与商品列表页的开发工作；',
+      '- 2022年参与商品列表页的开发工作；',
+      '- 有三年以上相关经验；',
+      '- 2022.06 - 2024.09 在职；',
+    ]) {
+      const report = verifyRewrite({ original: text, rewritten: text })
+      assert.deepEqual(
+        report.findings.filter((f) => f.severity === 'error').map((f) => f.code),
+        [],
+        `原样保留的时间表达不得误报：${text}`,
+      )
+    }
+  })
+
+  // ── 3. 程度副词导致的职责强度抬升 ─────────────────────────────────
+  //
+  // 【缺陷】词表只查**动词本身**，`负责` → `全权负责` 的增强修饰被忽略，
+  // 层级相同 → 静默。但"全权负责"与"负责"在责任边界上是两回事。
+  test('同动词加程度副词必须判为职责升格', () => {
+    for (const [original, rewritten] of [
+      ['- 我负责商品列表页的开发工作；', '- 我全权负责商品列表页的开发工作；'],
+      ['- 我主导商品列表页的开发工作；', '- 我全面主导商品列表页的开发工作；'],
+      ['- 我承担商品列表页的开发工作；', '- 我独自承担商品列表页的开发工作；'],
+    ]) {
+      const report = verifyRewrite({ original, rewritten })
+      assert.equal(report.ok, false, `程度副词抬升职责必须拦下：${original} → ${rewritten}`)
+      assert.ok(
+        report.findings.some((f) => f.code === 'RESPONSIBILITY_INFLATED'),
+        `必须报 RESPONSIBILITY_INFLATED：${original} → ${rewritten}`,
+      )
+    }
+  })
+
+  test('认知层的程度描写与等价修饰不得误报', () => {
+    // 【为什么只收高层动词】"全面了解/深入学习"是简历常规润色，
+    // 把认知层也纳入会制造大量误报（而"频繁误报的守卫比没有守卫更糟"）。
+    for (const [original, rewritten] of [
+      ['- 我了解商品列表页的开发；', '- 我全面了解商品列表页的开发；'],
+      ['- 我全面负责商品列表页的开发工作；', '- 我全面负责商品列表页的开发工作；'],
+      ['- 我全权负责商品列表页的开发工作；', '- 我全权负责商品列表页的开发；'],
+    ]) {
+      const report = verifyRewrite({ original, rewritten })
+      assert.ok(
+        !report.findings.some((f) => f.code === 'RESPONSIBILITY_INFLATED'),
+        `不得误报职责升格：${original} → ${rewritten}`,
+      )
+    }
+  })
+
+  // ── 4. 表格短单元格编造（表头剥离 + <8 字豁免叠加的缝隙）──────────
+  //
+  // 【缺陷】表头 `| 领域 | 专长 |` 被当表头剥掉，数据行 `| 增长 | 策略 |`
+  // 拍平后 5 字 < 8，进不了内容单元比对；`detectDroppedHeaderContent`
+  // 又跳过 < 6 字的单元格 → 三个豁免叠加出完全静默。
+  test('整表短单元格编造必须报出（不得静默）', () => {
+    for (const [original, table] of [
+      ['- 参与商品列表页的开发工作；', '| 领域 | 专长 |\n| --- | --- |\n| 增长 | 策略 |'],
+      ['- 参与商品列表页的开发工作；', '| 方向 | 能力 |\n| --- | --- |\n| 增长 | 策略 |'],
+    ]) {
+      const report = verifyRewrite({ original, rewritten: table })
+      assert.ok(
+        report.findings.some((f) => f.code === 'POSSIBLE_DROPPED_HEADER_CONTENT'),
+        `整表短格编造必须报出，不得静默：${table}`,
+      )
+      assert.equal(report.ok, true, '兜底告警是 warn，不得阻断交付')
+    }
+  })
+
+  test('真实内容的表格化必须放行（含特征或原文有出处）', () => {
+    // 【反向锁定的关键】只要**任何一格**含事实主张特征（数字/机构/技术专名/
+    // 职责动词，如 `参与开发` 的「参与」）或能在原文找到出处，就认为是
+    // "把真实内容表格化"的正常排版，不得报。
+    const B = '## 专业技能\n- 熟悉 Java / MySQL 的使用\n'
+    for (const [original, table] of [
+      [B, '| Category | Skills |\n|---|---|\n| 后端 | Java / MySQL |'],
+      [B, '| 类别 | 技能 |\n|---|---|\n| 后端 | Java / MySQL |'],
+      [B, '| 模块 | 说明 |\n|---|---|\n| 商品列表页 | 参与开发 |'],
+      ['- 参与商品列表页的开发工作；', '| 模块 | 说明 |\n|---|---|\n| 商品列表页 | 参与开发 |'],
+    ]) {
+      const report = verifyRewrite({ original, rewritten: `${original}\n${table}\n` })
+      assert.ok(
+        !report.findings.some((f) => f.code === 'POSSIBLE_DROPPED_HEADER_CONTENT'),
+        `真实内容的表格化不得误报：${table}`,
+      )
+    }
   })
 })
