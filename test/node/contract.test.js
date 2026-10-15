@@ -470,13 +470,14 @@ describe('量化数据核对的呈现层（面向用户，必须可行动）', (
   ].join('\n')
 
   /** 取渲染文本（去掉很长的「已知边界」段，只留下用户首先看到的部分） */
-  const renderHead = (rewritten) => {
+  const renderHead0 = (original, rewritten) => {
     const def = createVerifyToolDefinition()
-    const value = buildVerifyValue({ original: ORIGINAL, rewritten })
+    const value = buildVerifyValue({ original, rewritten })
     const text = def.output.render({}, value)[0].text
     const at = text.indexOf('本校验的已知边界')
     return at < 0 ? text : text.slice(0, at)
   }
+  const renderHead = (rewritten) => renderHead0(ORIGINAL, rewritten)
 
   test('数字换写法时，两侧写法必须并列展示（不让用户自己做换算）', () => {
     // `8 万 → 80000` 一眼可对照；只给 `80000` 则用户要自己换算。
@@ -522,5 +523,70 @@ describe('量化数据核对的呈现层（面向用户，必须可行动）', (
       !/·\s*2\s*[（(]/.test(out) && !/「2」/.test(out),
       'Vue2 的 2 不是量化数据，不得列进核对清单',
     )
+  })
+
+  // ── 机构名 / 技术名 / 日期也要能核对（本轮扩展）────────────────────
+  const ORIGINAL2 = [
+    '# 张三',
+    '## 项目经历',
+    '- 在某互联网公司实习，负责商品列表页开发，性能提升 40%，服务 8 万用户（2026.03 - 2026.06）；',
+  ].join('\n')
+
+  const head2 = (rewritten) =>
+    renderHead0(ORIGINAL2, rewritten)
+
+  test('换了公司名必须点名指出，并给出处理方式', () => {
+    const out = head2(ORIGINAL2.replace('某互联网公司', '字节跳动公司'))
+    assert.match(out, /字节跳动公司/, '必须点名编造的公司')
+    assert.match(out, /原简历里没有这个名字/, '必须说明它在原简历里找不到')
+    assert.match(out, /处理方式|删掉|改回/, '必须给出可执行的处理方式')
+  })
+
+  test('时间点被改动必须点名指出（背调对不上的风险）', () => {
+    const out = head2(ORIGINAL2.replace('2026.03', '2022.10'))
+    assert.match(out, /2022\s*年\s*10\s*月/, '必须点名被改动的时间点')
+    assert.match(out, /背调|改回真实的/, '必须说明风险并给出处理方式')
+  })
+
+  test('合法的日期规范化不得被报（同一时间点的另一种写法）', () => {
+    const out = head2(ORIGINAL2.replace('2026.03', '2026年3月').replace('2026.06', '2026年6月'))
+    assert.ok(
+      !out.includes('2026 年 3 月') || !/❗/.test(out),
+      '纯写法规范化（点号↔年月）不是"改动"，不得列进待确认清单',
+    )
+  })
+
+  test('名称与时间点无问题时，不得混进数字的核对清单', () => {
+    // 噪声控制：只有"需要用户核对/注意"的项才显示。
+    const out = head2(ORIGINAL2)
+    assert.ok(!out.includes('某互联网公司'), '原简历里有的公司名不该出现在待确认清单')
+    assert.ok(!out.includes('2026 年 3 月'), '没被改动的时间点不该出现在待确认清单')
+  })
+
+  test('零漂移：守卫报 error 时，核对说明不得声称"都没问题"', () => {
+    // 【这是最重要的一条】对照表与守卫必须同进同退。
+    // 若守卫判了 error 而对照表给出"✅ 都能找到出处"，就是自相矛盾的假断言。
+    const badCases = [
+      ORIGINAL2.replace('服务 8 万用户', '服务 8 万用户，QPS 提升 300%'),
+      ORIGINAL2.replace('某互联网公司', '字节跳动公司'),
+      ORIGINAL2.replace('2026.03', '2022.10'),
+    ]
+    for (const rewritten of badCases) {
+      const value = buildVerifyValue({ original: ORIGINAL2, rewritten })
+      assert.equal(value.ok, false, `该用例应判不通过：${rewritten}`)
+      const text = createVerifyToolDefinition().output.render({}, value)[0].text
+      assert.ok(
+        !text.includes('都能在你的原简历里找到出处'),
+        '守卫判 error 时，核对说明不得同时声称"都没问题"（假断言）',
+      )
+      assert.match(text, /❗/, '必须有明确的待确认提示')
+    }
+  })
+
+  test('零漂移：守卫放行时，核对说明不得出现待确认项', () => {
+    const value = buildVerifyValue({ original: ORIGINAL2, rewritten: ORIGINAL2 })
+    assert.equal(value.ok, true)
+    const text = createVerifyToolDefinition().output.render({}, value)[0].text
+    assert.ok(!text.includes('❗'), '守卫放行时不得出现"找不到"的告警')
   })
 })

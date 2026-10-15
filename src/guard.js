@@ -74,6 +74,20 @@ export const GUARD_LIMITATIONS = [
 //     · 展示**原文写法**而非归一化 token（`8 万` 而非 `80000`、`2.4s` 而非
 //       `time:2.4`）——归一化值是内部形式，用户看不懂。
 //   测试 469 → **474**。
+// 1.7.0：核对表从"只覆盖数字"扩展到**机构名 / 技术名 / 时间点**三类，
+//   并改为**接收 `verifyRewrite` 已算好的判定集合**（零漂移的物理保证）。
+//   【为什么必须改数据流向】第一版让 buildProvenance 自己重算一遍，
+//   当时实测零漂移，但那是**靠两边实现恰好一致**维持的——任何一侧改了判据，
+//   漂移即刻发生，而其表现正是本项目最忌的**假断言**
+//   （"守卫说没问题、核对表说没出处"）。现在由 verifyRewrite 把
+//   `fabricatedEntities` / `changedDates` 等**结论**传进去，物理上不可能漂移。
+//   【扩展时踩到并修掉的两处误导（都是"事实错误的断言"）】
+//     · 换公司名（`某互联网公司` → `字节跳动公司`）曾被同时报成
+//       "原来那家不见了"——那是**换名**不是丢经历，会误导用户以为误删了内容。
+//       现：有编造实体接替时不报 dropped。
+//     · 技术名/时间点不变时也列进清单 = 纯噪声（会让用户忽略真正的问题）。
+//       现：只列**需要用户核对或注意**的项。
+//   测试 474 → **486**。
 // 1.5.0：第三轮独立对抗审查，目标单一（只找静默放行）但换成**新语料形态**
 //   （双栏折行 / 含图片简历 / 日韩混排 / 超长跨页断点 / HTML 实体 / Unicode
 //    同形字与零宽字符 / 链接花式写法 / 财年季度日期）。审查交付 22 例静默放行、
@@ -136,7 +150,7 @@ export const GUARD_LIMITATIONS = [
 //   · 容量单位大小写：新增 UNIT_CASE_CHANGED（原来完全静默）
 //   · 职责升格：下推到内容单元级（原来按全文 min/max，双向都错）
 //   · 自证清白：拆为 equal/contains 两档并分别处理（原来会误伤合法改写）
-export const GUARD_VERSION = '1.6.0'
+export const GUARD_VERSION = '1.7.0'
 
 /**
  * 中文机构名后缀。用于识别"改写后新出现的机构"。
@@ -2965,9 +2979,9 @@ function appearsIn(candidate, haystack) {
  * @property {string[]} limitations 本校验的已知局限
  * @property {{ verified: string[], unverified: string[] } | null} coverage
  *   关键词覆盖回验结果；未提供自报关键词时为 null
- * @property {{ numbers: ProvenanceRow[] }} provenance
- *   溯源表：改写里每个量化主张 → 原文出处。**与 findings 同源**
- *   （复用同一套归一化与配对），是判定的输出层而非第二套判据。
+ * @property {{ numbers: ProvenanceRow[], entities: ProvenanceRow[], dates: ProvenanceRow[] }} provenance
+ *   核对表：改写里的每个数字/名称/时间点 → 原文出处。**与 findings 同源**
+ *   （直接复用守卫算出的判定集合），是判定的输出层而非第二套判据。
  * @property {{ originalNumbers: number, rewrittenNumbers: number, originalEntities: number, rewrittenEntities: number }} stats 统计
  */
 
@@ -2993,19 +3007,45 @@ function appearsIn(candidate, haystack) {
  * ⚠️ `untraced` 不直接等于"编造"：ATS 对齐、单位换算、汉字数字等价等合法动作
  * 都走同一条归一化路径，已被守卫放行；此处只是把"放行/拦下"的原因摊开给人看。
  *
- * @param {{ original?: unknown, rewritten?: unknown }} [args]
- * @returns {{ numbers: ProvenanceRow[] }}
+ * 【为什么改成接收"已算好的判定"（零漂移的物理保证）】
+ * 第一版让本函数自己重算一遍（自己抽 token、自己比集合）。虽然当时实测零漂移，
+ * 但那是**靠两边实现恰好一致**维持的——任何一侧改了判据，漂移即刻发生，
+ * 而这种漂移的表现正是本项目最忌的**假断言**（"守卫说没问题、对照表说没出处"）。
+ * 现在改为由 {@link verifyRewrite} 把**已经算出来的集合**传进来：
+ * 对照表与 findings 用的是同一批变量，**物理上不可能漂移**。
+ *
+ * @param {object} [args]
+ * @param {string} [args.originalText] 已归一化的原文
+ * @param {string} [args.rewrittenText] 已归一化的改写
+ * @param {Set<string>} [args.originalNumbers] 原文数值 token（守卫已算）
+ * @param {Set<string>} [args.rewrittenNumbers] 改写数值 token（守卫已算）
+ * @param {Set<string>} [args.originalEntities] 原文实体（守卫已算）
+ * @param {Set<string>} [args.rewrittenEntities] 改写实体（守卫已算）
+ * @param {Set<string>} [args.fabricatedEntities] **被判编造的实体**（守卫的结论）
+ * @param {Set<string>} [args.originalDates] 原文日期 token（守卫已算）
+ * @param {Set<string>} [args.rewrittenDates] 改写日期 token（守卫已算）
+ * @param {Set<string>} [args.changedDates] **被判改动的时间点**（守卫的结论）
+ * @returns {{ numbers: ProvenanceRow[], entities: ProvenanceRow[], dates: ProvenanceRow[] }}
  */
-export function buildProvenance({ original, rewritten } = {}) {
-  const originalText = normalizeText(original)
-  const rewrittenText = normalizeText(rewritten)
-
+export function buildProvenance({
+  originalText = '',
+  rewrittenText = '',
+  originalNumbers = new Set(),
+  rewrittenNumbers = new Set(),
+  originalEntities = new Set(),
+  rewrittenEntities = new Set(),
+  fabricatedEntities = new Set(),
+  originalDates = new Set(),
+  rewrittenDates = new Set(),
+  changedDates = new Set(),
+} = {}) {
   /** @type {ProvenanceRow[]} */
   const numbers = []
-  if (rewrittenText === '') return { numbers }
-
-  const originalNumbers = extractNumericTokens(originalText)
-  const rewrittenNumbers = extractNumericTokens(rewrittenText)
+  /** @type {ProvenanceRow[]} */
+  const entities = []
+  /** @type {ProvenanceRow[]} */
+  const dates = []
+  if (rewrittenText === '') return { numbers, entities, dates }
 
   // 原文条目（复用内容单元切分——与守卫的配对逻辑同源）
   const originalUnits = extractContentUnits(originalText)
@@ -3023,6 +3063,34 @@ export function buildProvenance({ original, rewritten } = {}) {
       if (extractNumericTokens(unit).has(token)) return unit
     }
     return null
+  }
+
+  /**
+   * 在原文条目里定位一个**实体或日期**的出处。
+   *
+   * 与数值不同，实体/日期本身就是原文里的字面（`某互联网公司`、`2026-03`），
+   * 故直接找包含它的条目即可；日期 token 是内部格式（`2026-03`），
+   * 需先把候选条目也跑一遍 {@link extractDateTokens} 再比集合。
+   * @param {string} token 实体或日期 token
+   * @returns {string | null} 出处条目；找不到返回 null
+   */
+  const locateEntity = (token) => {
+    for (const unit of originalUnits) {
+      if (appearsIn(token, unit)) return unit
+      if (extractDateTokens(unit).has(token)) return unit
+    }
+    // 短行（< 8 字）不在内容单元里——退回整篇查找，避免假报"无出处"
+    return appearsIn(token, originalText) ? token : null
+  }
+
+  /**
+   * 把内部日期 token 转成用户看得懂的写法（`2026-03` → `2026 年 3 月`）。
+   * @param {string} date 内部日期 token
+   * @returns {string} 可读写法
+   */
+  const formatDateReadable = (date) => {
+    if (date.length <= 4) return `${date} 年`
+    return `${date.slice(0, 4)} 年 ${Number(date.slice(5, 7))} 月`
   }
 
   /**
@@ -3103,7 +3171,76 @@ export function buildProvenance({ original, rewritten } = {}) {
     })
   }
 
-  return { numbers }
+  // ── 机构名 / 技术名 ────────────────────────────────────────────────
+  //
+  // 【为什么也要给用户看】换公司名是最典型的事实编造（`某互联网公司` →
+  // `字节跳动公司`），用户同样需要核对"改写后写的公司，我原简历里真的有吗"。
+  //
+  // ⚠️ 状态判定**直接用守卫的结论** `fabricatedEntities`，不自己再判一次——
+  // 实体判定带 ATS 注记、缩写展开等复杂豁免，自己重判必然漂移。
+  for (const entity of rewrittenEntities) {
+    const fabricated = fabricatedEntities.has(entity)
+    if (!fabricated) continue // 原文就有的实体：不是"需要用户核对"的东西，列出来只是噪声
+    entities.push({
+      value: entity,
+      originalForm: null,
+      unit: null,
+      status: 'untraced',
+      source: null,
+    })
+  }
+  for (const entity of originalEntities) {
+    // 原文有、改写后整体消失的实体：只在它确实不再出现于改写文本时才报
+    if (rewrittenEntities.has(entity)) continue
+    if (appearsIn(entity, rewrittenText)) continue
+    // 【为什么"有编造实体接替时"不报 dropped（实测误导）】
+    // `某互联网公司` → `字节跳动公司` 是**换名**（同一处被换掉），
+    // 不是"丢了一条经历"。此时若同时报"原来写的某互联网公司不见了"，
+    // 用户会以为自己在精简时误删了内容——而真正的问题是"换了名字"，
+    // 已在 untraced 里说清。报 dropped 是**事实错误的断言**（本项目最忌）。
+    if (fabricatedEntities.size > 0) continue
+    entities.push({
+      value: entity,
+      originalForm: entity,
+      unit: null,
+      status: 'dropped',
+      source: locateEntity(entity),
+    })
+  }
+
+  // ── 时间点 ─────────────────────────────────────────────────────────
+  //
+  // 状态同样**直接用守卫的结论** `changedDates`（它已处理"补全月份属写法完善"
+  // 与"同年换月属真改动"的区分），不自己再判一次。
+  for (const date of rewrittenDates) {
+    const changed = changedDates.has(date)
+    if (!changed) continue // 原文就有的时间点：无需用户核对，列出来只是噪声
+    dates.push({
+      value: formatDateReadable(date),
+      originalForm: null,
+      unit: null,
+      status: 'untraced',
+      source: null,
+    })
+  }
+  for (const date of originalDates) {
+    if (rewrittenDates.has(date)) continue
+    // 补全月份（`2022` → `2022年9月`）会让原文的裸年份"消失"，
+    // 但那是写法完善不是丢数据——留档时不该惊动用户。
+    if ([...rewrittenDates].some((d) => d.startsWith(date.slice(0, 4)))) continue
+    // 同实体：有"被改动的时间点"时，这条原文日期多半就是被改的那一个，
+    // 已在 untraced 说清；再报 dropped 会变成两条互相矛盾的信息。
+    if (changedDates.size > 0) continue
+    dates.push({
+      value: formatDateReadable(date),
+      originalForm: formatDateReadable(date),
+      unit: null,
+      status: 'dropped',
+      source: locateEntity(date),
+    })
+  }
+
+  return { numbers, entities, dates }
 }
 
 /**
@@ -4951,7 +5088,19 @@ export function verifyRewrite({ original, rewritten, claimedKeywords } = {}) {
     findings,
     limitations: GUARD_LIMITATIONS,
     coverage,
-    provenance: buildProvenance({ original, rewritten }),
+    provenance: buildProvenance({
+      originalText,
+      rewrittenText,
+      originalNumbers,
+      rewrittenNumbers,
+      originalEntities,
+      rewrittenEntities,
+      // 传**守卫自己的结论**，而非让对照表重判——零漂移的物理保证
+      fabricatedEntities: new Set(fabricatedEntities),
+      originalDates,
+      rewrittenDates,
+      changedDates: new Set(changedDates),
+    }),
     stats: {
       originalNumbers: originalNumbers.size,
       rewrittenNumbers: rewrittenNumbers.size,

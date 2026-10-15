@@ -366,12 +366,18 @@ export function buildVerifyValue({ original, rewritten, claimedKeywords } = {}) 
       //   · **问题在前、正常项汇总在后**，不把全绿清单糊给用户
       //   · 每条问题都带**一句该怎么办**
       const rows = report.provenance.numbers
+      const entRows = report.provenance.entities
+      const dateRows = report.provenance.dates
       /** @type {string[]} */
       const lines = []
 
       const bad = rows.filter((r) => r.status === 'untraced')
       const lost = rows.filter((r) => r.status === 'dropped')
       const okRows = rows.filter((r) => r.status === 'traced')
+      const badEnt = entRows.filter((r) => r.status === 'untraced')
+      const lostEnt = entRows.filter((r) => r.status === 'dropped')
+      const badDate = dateRows.filter((r) => r.status === 'untraced')
+      const lostDate = dateRows.filter((r) => r.status === 'dropped')
 
       if (bad.length > 0) {
         lines.push(`❗ 有 ${bad.length} 处数字在你的原简历里找不到，请确认是否真实：`)
@@ -382,15 +388,34 @@ export function buildVerifyValue({ original, rewritten, claimedKeywords } = {}) 
         lines.push('   如果确实是你做过但没写进原简历的，请先把它补进原简历再改。')
       }
 
-      if (lost.length > 0) {
-        lines.push(`⚠ 有 ${lost.length} 处原简历里的数字，改写后不见了：`)
-        for (const r of lost) {
-          lines.push(`   · 原来写的「${r.originalForm ?? r.value}」现在没有了`)
+      if (badDate.length > 0) {
+        lines.push(`❗ 有 ${badDate.length} 处时间点在你的原简历里找不到，请确认：`)
+        for (const r of badDate) {
+          lines.push(`   · 「${r.value}」— 原简历里没有这个时间点`)
         }
-        lines.push('   处理方式：除非你是故意精简，否则建议保留——真实数据最有说服力。')
+        lines.push('   处理方式：起止日期是最容易在背调时对不上的字段，务必改回真实的。')
       }
 
-      if (bad.length === 0 && lost.length === 0 && okRows.length > 0) {
+      if (badEnt.length > 0) {
+        lines.push(`❗ 有 ${badEnt.length} 处名称在你原简历里找不到，请确认是否真实：`)
+        for (const r of badEnt) {
+          lines.push(`   · 「${r.value}」— 原简历里没有这个名字`)
+        }
+        lines.push('   处理方式：公司名、技术名、项目名都必须是你真实经历过的，')
+        lines.push('   没有的请删掉；写法和原简历不一致的（比如只写了简称）请改回。')
+      }
+
+      const lostTotal = lost.length + lostEnt.length + lostDate.length
+      if (lostTotal > 0) {
+        lines.push(`⚠ 有 ${lostTotal} 处原简历里的内容，改写后不见了：`)
+        for (const r of lost) lines.push(`   · 数字「${r.originalForm ?? r.value}」现在没有了`)
+        for (const r of lostDate) lines.push(`   · 时间点「${r.originalForm ?? r.value}」现在没有了`)
+        for (const r of lostEnt) lines.push(`   · 名称「${r.originalForm ?? r.value}」现在没有了`)
+        lines.push('   处理方式：除非你是故意精简，否则建议保留——真实内容最有说服力。')
+      }
+
+      const anyIssue = bad.length + badEnt.length + badDate.length + lostTotal > 0
+      if (!anyIssue && okRows.length > 0) {
         lines.push(
           `✅ 简历里的 ${okRows.length} 处数字都能在你的原简历里找到出处，逐条对照如下：`,
         )
@@ -402,6 +427,8 @@ export function buildVerifyValue({ original, rewritten, claimedKeywords } = {}) 
               : `   · ${from} → ${r.value}（改成了另一种写法，数值没变）`,
           )
         }
+      } else if (!anyIssue && okRows.length === 0) {
+        lines.push('✅ 简历里没有需要核对的量化数据，或原文本身就没有数字。')
       } else if (okRows.length > 0) {
         lines.push(`（另有 ${okRows.length} 处数字能在原简历里找到出处，无问题。）`)
       }
