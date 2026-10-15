@@ -27,7 +27,7 @@ npm run verify
 
 ## 检查清单
 
-- [ ] `npm run verify` 全绿（语法 + 类型 + 92 项测试 + 示例）
+- [ ] `npm run verify` 全绿（语法 + 类型 + 全部测试 + 示例）
 - [ ] 未引入任何 `import '@deepseek-ai/*'`（会导致真机崩溃）
 - [ ] `package.json` 的 `dependencies` 仍为空
 - [ ] 新增 schema 已通过 `test/node/schema.test.js`（真机校验）
