@@ -77,7 +77,7 @@ export { buildDocx, buildZip, parseResumeMarkdown, assembleDeliverable } from '.
 /**
  * 读取可选的导出根目录约束。
  *
- * 【存在理由（外部审查发现 S2-2）】
+ * 【存在理由（经独立验证发现）】
  * `SECURITY.md` 把会话模型定为"不受信任输出源"，而 `outputPath` 是
  * **模型传入的参数**。夹带在 JD 里的提示词注入可诱导模型在任意**
  * 已存在**的目录里创建文件。写盘前把路径限制在用户声明的范围内，
@@ -203,7 +203,7 @@ export async function writeResumeFile(path, data) {
 
   await fs.writeFile(target, data)
   // 返回**实际落盘的绝对路径**：调用方据此向用户回执唯一可信的位置。
-  // 若回显入参，用户传入相对路径时回执会与文件真实位置不一致（S3-5）。
+  // 若回显入参，用户传入相对路径时回执会与文件真实位置不一致。
   return target
 }
 

@@ -21,8 +21,8 @@ function candidateSpecifiers() {
   if (process.env.DSH_TOOLS_URL) list.push(process.env.DSH_TOOLS_URL)
 
   const hostRoots = [
+    // 显式指定优先——开发机上用它指向本地平台安装目录
     process.env.DSH_INSTALL_ROOT,
-    'D:/Tools/dsh-app',
     process.env.APPDATA ? join(process.env.APPDATA, 'npm/node_modules/dsh') : undefined,
   ].filter(Boolean)
 

@@ -269,7 +269,7 @@ export function buildVerifyValue({ original, rewritten, claimedKeywords } = {}) 
 
   let summary
   if (errorCount > 0) {
-    // 【为什么也必须按实际 finding 生成（本轮自查发现的真实 bug）】
+    // 【为什么也必须按实际 finding 生成（自查发现的真实 bug）】
     // 这里原先写死一句"删除编造数字/机构、把职责动词改回原强度、恢复被改动的日期"。
     // 但 error 级**共有 6 种**，其中两种与这句话毫无关系：
     //   · `NOVEL_CONTENT`（整条新增）→ 该做的是**删掉多出来的那条**，
@@ -305,7 +305,7 @@ export function buildVerifyValue({ original, rewritten, claimedKeywords } = {}) 
   } else if (warnCount > 0) {
     // 【为什么必须按实际 finding 生成，不能写死一句文案（独立审查发现的真实 bug）】
     // 早期这里写的是"原文的部分真实数据在改写后消失"，但那只是**其中一种** warn。
-    // 本轮新增了 `AMBIGUOUS_NEW_TERM`（新增了待确认的技术名）与
+    // 本版新增了 `AMBIGUOUS_NEW_TERM`（新增了待确认的技术名）与
     // `VANISHED_TECH_TERM`（技术名消失）等 warn 级后，写死的文案会与实际情况不符：
     // 模型被告知"数据丢失"，而真实问题是"新增了技术名"——它会**照错方向修正**，
     // 而 `verify_rewrite` 的修正闭环正是靠这段 summary 驱动的。
@@ -445,7 +445,7 @@ export function buildVerifyValue({ original, rewritten, claimedKeywords } = {}) 
 export function createVerifyToolDefinition() {
   return {
     name: VERIFY_TOOL_NAME,
-    // 【描述必须与实现同步（本轮自查发现的同类漂移）】
+    // 【描述必须与实现同步（自查发现的同类漂移）】
     // 工具 description 是模型决定"要不要用、怎么用"的依据，属于**会随判定变化而失效的文案**。
     // 它此前只列了"数字 / 机构专名 / 职责升格 / 时间点 / 数据丢失"，
     // 而判定后来已扩展到**整条新增**（`NOVEL_CONTENT`）、
@@ -705,7 +705,7 @@ export async function exportResume(args, writeFile) {
   // 任何编造都"有据可依"，而返回值还会宣称"校验已通过"。
   // 那比不做这道关更糟：它把"没有校验"伪装成"校验通过"。
   //
-  // 【为什么判定逻辑放在 guard.js（外部审查发现 S1-3）】
+  // 【为什么判定逻辑放在 guard.js（经独立验证发现 自证清白类缺陷）】
   // 内联的第一版只做 `trim 后相等` 判定，于是**加任意一行即可绕过**：
   //   `original = 编造版 + "以上为我的原始简历内容"` → 导出成功且 verified=true。
   // 现在判定由 {@link detectSelfAttestation} 统一负责（纯函数、有独立测试），
@@ -715,7 +715,7 @@ export async function exportResume(args, writeFile) {
   // 第一版把 `equal` 与 `contains` 都直接拒绝导出，于是**误伤了合法改写**：
   //   original `- A\n- B` → resume `- A`（模型只是删掉一条经历，一字未改）
   //   → 被判为"副本"并拒绝 → 用户永久拿不到文件，
-  //     正是 S1-1 那一类**投递死锁**（用户视角：改好了却导不出）。
+  //     正是那一类**投递死锁**（用户视角：改好了却导不出）。
   //
   // 纯文本层面**无法区分**"尾部加了装饰"与"删掉了一条经历"——
   // 两者都表现为"original = resume + 一小段"。任何阈值只是把误判挪个位置。
@@ -785,7 +785,7 @@ export async function exportResume(args, writeFile) {
 
   // 写入实现返回**实际落盘的绝对路径**（装配层负责 resolve）。
   //
-  // 【存在理由（外部审查发现 S3-5）】
+  // 【存在理由（经独立验证发现 回执路径缺陷）】
   // 此前返回值直接回显用户传入的 `outputPath`：参数文档声称它是"绝对路径"，
   // 但代码既不校验也不解析，于是传入相对路径时，用户拿到的回执
   // 与文件真实位置不一致——按回执去找文件会找不到。

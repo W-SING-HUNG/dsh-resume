@@ -67,7 +67,8 @@ jobs:
             ### 安装
 
             ```bash
-            dsh plugin --profile <profile> add "file:///$DSH_HOME/plugins/dsh-resume"
+            dsh plugin --profile <profile> add "file:<仓库路径>"
             ```
 
-            插件需加入 profile 的 `dsh.profile.bundles` 列表后生效，详见 [README](https://github.com/${{ github.repository }}#快速开始)。
+            一条命令即可：CLI 会自动写入 profile 的 `dependencies` 与
+            `dsh.profile.bundles` 两处，无需手工编辑任何文件。详见 [README](https://github.com/${{ github.repository }}#快速开始)。
