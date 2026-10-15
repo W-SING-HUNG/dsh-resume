@@ -59,6 +59,21 @@ export const GUARD_LIMITATIONS = [
 ]
 
 /** 守卫版本。判定规则变化时递增，便于回溯误报/漏报。 */
+// 1.6.0：新增**溯源表**（护城河落点：把判定层能力推进到用户可感知层）。
+//   此前守卫的全部输出停在布尔层（ok / findings），用户只能知道"有没有问题"，
+//   无法核对"这条数字在原文哪一句"。竞品（如 job-workbench）的反编造只做
+//   粗粒度校验，无人提供逐条溯源——这是本项目唯一可能建立的真护城河。
+//   【关键设计：溯源表不是新判据，是同一判据的输出层】
+//   复用 extractNumericTokens 的归一化与 extractContentUnits 的切分，
+//   不另起一套判定——否则两套判据漂移会立刻制造"守卫说没问题、溯源表说没出处"
+//   的自相矛盾（本项目最忌的假断言）。
+//   【两处可用性收窄（实测噪声）】
+//     · 跳过"技术名内的数字"（`Vue2` 的 2）——那不是量化主张，列出来只是噪声，
+//       而噪声会让用户忽略真正的证据链。判据须同时查原文与改写（dropped 场景下
+//       技术名可能只在原文出现）。
+//     · 展示**原文写法**而非归一化 token（`8 万` 而非 `80000`、`2.4s` 而非
+//       `time:2.4`）——归一化值是内部形式，用户看不懂。
+//   测试 469 → **474**。
 // 1.5.0：第三轮独立对抗审查，目标单一（只找静默放行）但换成**新语料形态**
 //   （双栏折行 / 含图片简历 / 日韩混排 / 超长跨页断点 / HTML 实体 / Unicode
 //    同形字与零宽字符 / 链接花式写法 / 财年季度日期）。审查交付 22 例静默放行、
@@ -121,7 +136,7 @@ export const GUARD_LIMITATIONS = [
 //   · 容量单位大小写：新增 UNIT_CASE_CHANGED（原来完全静默）
 //   · 职责升格：下推到内容单元级（原来按全文 min/max，双向都错）
 //   · 自证清白：拆为 equal/contains 两档并分别处理（原来会误伤合法改写）
-export const GUARD_VERSION = '1.5.0'
+export const GUARD_VERSION = '1.6.0'
 
 /**
  * 中文机构名后缀。用于识别"改写后新出现的机构"。
@@ -2924,6 +2939,17 @@ function appearsIn(candidate, haystack) {
 }
 
 /**
+ * 溯源表的一行：一个数值 token 的溯源结果。
+ * @typedef {object} ProvenanceRow
+ * @property {string} value 归一化后的数值 token（如 `80000`、`size:536870912`）
+ * @property {string | null} unit 单位族标识（当前预留，数字条目为 null）
+ * @property {'traced' | 'untraced' | 'dropped'} status
+ *   `traced` 原文有等价数值且已定位到条目；`untraced` 原文找不到（须人工确认）；
+ *   `dropped` 原文有、改写里消失了（提醒别丢真实数据）
+ * @property {string | null} source 出处的原文条目；untraced 时为 null
+ */
+
+/**
  * 校验报告。
  * @typedef {object} GuardReport
  * @property {boolean} ok 是否通过（无 error 级问题）
@@ -2932,8 +2958,126 @@ function appearsIn(candidate, haystack) {
  * @property {string[]} limitations 本校验的已知局限
  * @property {{ verified: string[], unverified: string[] } | null} coverage
  *   关键词覆盖回验结果；未提供自报关键词时为 null
+ * @property {{ numbers: ProvenanceRow[] }} provenance
+ *   溯源表：改写里每个量化主张 → 原文出处。**与 findings 同源**
+ *   （复用同一套归一化与配对），是判定的输出层而非第二套判据。
  * @property {{ originalNumbers: number, rewrittenNumbers: number, originalEntities: number, rewrittenEntities: number }} stats 统计
  */
+
+/**
+ * 溯源表：把"改写里的每个量化主张"映射回"原文的哪一条"。
+ *
+ * 【为什么做这个（护城河的落点）】
+ * 本项目此前的全部能力都停在**判定**层：告诉模型/用户"有没有编造"。
+ * 但用户真正需要的是另一件事——**这条数字能不能在原文找到出处**，
+ * 以及"出处是哪一句"。竞品（如 `job-workbench`）的反编造只做到粗粒度校验，
+ * 无人提供逐条溯源；这正是本项目唯一可能建立的真护城河。
+ *
+ * 【关键设计：这不是新判据，是同一判据的输出层】
+ * 复用 {@link extractNumericTokens} 的归一化与 {@link matchUnitsToOriginal}
+ * 的配对，**不另起一套判定**——否则两套判据漂移会立刻制造
+ * "守卫说没问题、溯源表说没出处"的自相矛盾（本项目最忌的假断言）。
+ *
+ * 【分级语义（与守卫的严重度排序一致）】
+ *   · `traced`   原文有等价数值，且定位到了具体条目 → 用户可点开核对
+ *   · `untraced` 改写里出现、原文任何条目都找不到等价数值 → **必须人工确认**
+ *   · `dropped`  原文有、改写里消失了 → 提醒别丢真实数据
+ *
+ * ⚠️ `untraced` 不直接等于"编造"：ATS 对齐、单位换算、汉字数字等价等合法动作
+ * 都走同一条归一化路径，已被守卫放行；此处只是把"放行/拦下"的原因摊开给人看。
+ *
+ * @param {{ original?: unknown, rewritten?: unknown }} [args]
+ * @returns {{ numbers: Array<{ value: string, unit: string | null, status: 'traced' | 'untraced' | 'dropped', source: string | null }> }}
+ */
+export function buildProvenance({ original, rewritten } = {}) {
+  const originalText = normalizeText(original)
+  const rewrittenText = normalizeText(rewritten)
+
+  /** @type {Array<{ value: string, unit: string | null, status: 'traced' | 'untraced' | 'dropped', source: string | null }>} */
+  const numbers = []
+  if (rewrittenText === '') return { numbers }
+
+  const originalNumbers = extractNumericTokens(originalText)
+  const rewrittenNumbers = extractNumericTokens(rewrittenText)
+
+  // 原文条目（复用内容单元切分——与守卫的配对逻辑同源）
+  const originalUnits = extractContentUnits(originalText)
+
+  /**
+   * 在原文条目里定位某个数值 token 的出处。
+   *
+   * 直接拿归一化后的 token 去条目里搜是不可靠的（`8000` 在原文写作 `8 千`），
+   * 故对每条原文单元也跑一次 {@link extractNumericTokens} 再比对集合。
+   * @param {string} token 归一化数值 token
+   * @returns {string | null} 出处条目；找不到返回 null
+   */
+  const locate = (token) => {
+    for (const unit of originalUnits) {
+      if (extractNumericTokens(unit).has(token)) return unit
+    }
+    return null
+  }
+
+  /**
+   * 取出 token 在**原文文本里的原始写法**（`8000` → `8 万`、`time:2.4` → `2.4s`）。
+   *
+   * 【为什么必须展示原写法】归一化 token 是内部形式（`time:2.4`、`size:536870912`），
+   * 用户看不懂；而"出处条目"已经给出了上下文，token 再显示成原文写法才能一眼对上。
+   * 展示用**改写侧**的出现形式（用户核对的是改写文本），找不到则退回归一化值。
+   * @param {string} token 归一化数值 token
+   * @returns {string} 可读的数值写法
+   */
+  const surfaceForm = (token) => {
+    const digits = token.replace(/^\w+:/, '')
+    const re = new RegExp(`\\d[\\d,.]*\\s*(?:亿|万|千|[KMB])?`, 'g')
+    for (const m of rewrittenText.matchAll(re)) {
+      const raw = m[0]
+      const normalized = [...extractNumericTokens(raw)][0]
+      if (normalized === token) return raw.trim()
+    }
+    return digits
+  }
+
+  /**
+   * 该 token 是否是"技术名的一部分"（如 `Vue2` 里的 `2`、`HTTP2` 里的 `2`）。
+   *
+   * 【为什么必须排除（实测噪声）】`extractNumericTokens` 会把 `Vue2` 的 `2`
+   * 也抽出来，于是溯源表出现 `✔ 2 ← …Vue2…` 这种**不是量化主张**的行——
+   * 噪声会让用户忽略真正的证据链（"告警常亮 = 守卫被忽略"的同款教训）。
+   * 判据：该数字在文本里**紧邻拉丁字母**（无边界），说明它是名称的一部分。
+   *
+   * ⚠️ 必须**同时查原文与改写**：`dropped` 场景下该技术名可能只在原文出现
+   * （整行被删），只查改写侧会漏掉、把 `Vue2` 的 2 当成"丢失的真实数据"。
+   * @param {string} token 归一化数值 token
+   * @returns {boolean} 是否为技术名的一部分
+   */
+  const isPartOfTechName = (token) => {
+    const digits = token.replace(/^\w+:/, '')
+    const escaped = digits.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+    const re = new RegExp(`[A-Za-z]${escaped}|${escaped}[A-Za-z]`, 'i')
+    return re.test(rewrittenText) || re.test(originalText)
+  }
+
+  for (const token of rewrittenNumbers) {
+    // 跳过技术名内的数字（`Vue2` 的 2）——不是量化主张，列出来只是噪声
+    if (isPartOfTechName(token)) continue
+    const shown = surfaceForm(token)
+    const found = locate(token)
+    if (originalNumbers.has(token) || found !== null) {
+      numbers.push({ value: shown, unit: null, status: 'traced', source: found })
+      continue
+    }
+    numbers.push({ value: shown, unit: null, status: 'untraced', source: null })
+  }
+
+  for (const token of originalNumbers) {
+    if (rewrittenNumbers.has(token)) continue
+    if (isPartOfTechName(token)) continue
+    numbers.push({ value: surfaceForm(token), unit: null, status: 'dropped', source: locate(token) })
+  }
+
+  return { numbers }
+}
 
 /**
  * 确定性校验：改写结果是否引入了原文不存在的内容。
@@ -4780,6 +4924,7 @@ export function verifyRewrite({ original, rewritten, claimedKeywords } = {}) {
     findings,
     limitations: GUARD_LIMITATIONS,
     coverage,
+    provenance: buildProvenance({ original, rewritten }),
     stats: {
       originalNumbers: originalNumbers.size,
       rewrittenNumbers: rewrittenNumbers.size,

@@ -241,6 +241,7 @@ describe('守卫：契约与元信息', () => {
       'guardVersion',
       'limitations',
       'ok',
+      'provenance',
       'stats',
     ])
     assert.deepEqual(Object.keys(report.stats).sort(), [
@@ -249,6 +250,13 @@ describe('守卫：契约与元信息', () => {
       'rewrittenEntities',
       'rewrittenNumbers',
     ])
+    // 溯源表结构（护城河落点：把判定展开成"数字 → 原文出处"的映射）
+    assert.ok(Array.isArray(report.provenance.numbers))
+    for (const row of report.provenance.numbers) {
+      assert.deepEqual(Object.keys(row).sort(), ['source', 'status', 'unit', 'value'])
+      assert.ok(['traced', 'untraced', 'dropped'].includes(row.status))
+      assert.equal(typeof row.value, 'string')
+    }
   })
 
   test('每条 finding 都有 code / severity / message / evidence', () => {
@@ -3918,5 +3926,104 @@ describe('守卫：新语料形态的静默放行修复（CJK 机构 / CJK 职�
     // 若将来有人修好了这条通道，此用例与文档同步更新。
     const declared = GUARD_LIMITATIONS.some((l) => l.includes('夹带'))
     assert.ok(declared, '已配对条目夹带主张的边界必须仍在 GUARD_LIMITATIONS 中声明')
+  })
+})
+
+// ═══════════════════════════════════════════════════════════════════════
+// 第三十九轮：溯源表（护城河落点）
+// ═══════════════════════════════════════════════════════════════════════
+//
+// 【为什么做这个】守卫此前的全部能力停在**判定**层（"有没有编造"），
+// 而用户真正需要的是**这条数字在原文哪一句**。竞品（如 job-workbench）的
+// 反编造只做粗粒度校验，无人提供逐条溯源——这是本项目唯一可能建立的
+// 真护城河（用户可感知、对手未覆盖）。
+//
+// 【关键设计：溯源表不是新判据，是同一判据的输出层】
+// 复用 extractNumericTokens 的归一化与 extractContentUnits 的切分，
+// 不另起一套判定——否则两套判据漂移会立刻制造"守卫说没问题、
+// 溯源表说没出处"的自相矛盾（本项目最忌的假断言）。
+// 因此下面第一组用例就是**合法侧零误标**：守卫放行的改写，
+// 其数字必须全部 traced。
+describe('守卫：溯源表（数字 → 原文出处）', () => {
+  test('合法改写的数字必须全部 traced（不得误标为无出处）', () => {
+    // 【为什么这是第一组】溯源表若把合法改写标成"无出处"，比没有溯源表更糟——
+    // 它会把"已校验通过"的交付变成"每条都待确认"，告警常亮 = 守卫被忽略。
+    const LEGIT = [
+      ['服务 8 万用户', '服务 80000 用户'],
+      ['商品列表 12000 个', '商品列表 1.2 万个'],
+      ['从 2.4s 缩短至 1.8s', '从 2400ms 缩短至 1800ms'],
+      ['耗时 1.5 分钟', '耗时 90 秒'],
+      ['体积 2MB', '体积 2048KB'],
+      ['实习 2026.03 开始', '实习 2026年3月开始'],
+      ['手机 13800000000', '手机 138-0000-0000'],
+      ['服务 12000 名用户，提升 40%。', '提升 40%，累计服务 12,000 名用户。'],
+      ['Handled 8K requests', 'Handled 8000 requests'],
+      ['- 服务五万用户；', '- 服务 50000 用户；'],
+      ['- 性能提升四成；', '- 性能提升 40%；'],
+    ]
+    for (const [original, rewritten] of LEGIT) {
+      const report = verifyRewrite({ original, rewritten })
+      const untraced = report.provenance.numbers.filter((p) => p.status === 'untraced')
+      assert.deepEqual(
+        untraced,
+        [],
+        `合法改写不得出现 untraced：${original} → ${rewritten}`,
+      )
+    }
+  })
+
+  test('编造的数字必须标 untraced，且与守卫判定一致', () => {
+    // 溯源表与守卫必须**同进同退**：守卫判 error 的编造，
+    // 溯源表必须能指出"哪一条无出处"。
+    const report = verifyRewrite({
+      original: '- 负责商品列表开发，性能提升 40%；',
+      rewritten: '- 负责商品列表开发，性能提升 40%，QPS 提升 300%；',
+    })
+    assert.equal(report.ok, false)
+    const untraced = report.provenance.numbers.filter((p) => p.status === 'untraced')
+    assert.deepEqual(
+      untraced.map((p) => p.value),
+      ['300'],
+      '编造的 300% 必须被标为 untraced',
+    )
+    const traced = report.provenance.numbers.filter((p) => p.status === 'traced')
+    assert.deepEqual(traced.map((p) => p.value), ['40'], '原文的 40% 必须 traced')
+    assert.ok(
+      traced[0].source?.includes('40%'),
+      'traced 行必须给出原文出处条目',
+    )
+  })
+
+  test('原文数字在改写后消失必须标 dropped', () => {
+    const report = verifyRewrite({
+      original: '- 性能提升 40%，服务 8 万用户；',
+      rewritten: '- 性能提升 40%；',
+    })
+    const dropped = report.provenance.numbers.filter((p) => p.status === 'dropped')
+    assert.deepEqual(
+      dropped.map((p) => p.value),
+      ['80000'],
+      '被删掉的真实量化结果必须标 dropped（提醒用户别丢数据）',
+    )
+  })
+
+  test('traced 行的出处必须能在原文里定位到', () => {
+    // 【反向锁定】source 为 null 的 traced 是假信息——用户点开却发现原文没有。
+    // 这是本项目最反对的"事实错误的断言"，必须拦住。
+    const report = verifyRewrite({
+      original: '- 负责商品列表开发，性能提升 40%，服务 8 万用户；',
+      rewritten: '- 负责商品列表页开发工作，性能提升 40%，服务 80000 用户；',
+    })
+    for (const row of report.provenance.numbers) {
+      if (row.status !== 'traced') continue
+      assert.ok(
+        typeof row.source === 'string' && row.source.length > 0,
+        `traced 行必须有非空出处：${row.value}`,
+      )
+    }
+  })
+
+  test('空输入不得产生溯源行', () => {
+    assert.deepEqual(verifyRewrite({ original: '', rewritten: '' }).provenance.numbers, [])
   })
 })

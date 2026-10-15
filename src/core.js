@@ -205,6 +205,15 @@ export const VERIFY_VALUE_SCHEMA = {
       items: { type: 'string' },
       description: '声称已覆盖但实际未出现的关键词',
     },
+    provenanceNotes: {
+      type: 'array',
+      items: { type: 'string' },
+      description:
+        '溯源表（每条量化主张 → 原文出处）。格式为「数值 ← 出处条目」；' +
+        '找不到出处的标「← 无出处（须人工确认）」。' +
+        '**这是给用户核对用的证据链**，不是新的拦截判据——' +
+        '与 findings 同源（同一套归一化与配对），不得据此推翻校验结论。',
+    },
   },
   required: [
     'ok',
@@ -216,6 +225,7 @@ export const VERIFY_VALUE_SCHEMA = {
     'limitations',
     'verifiedKeywords',
     'unverifiedKeywords',
+    'provenanceNotes',
   ],
 }
 
@@ -231,6 +241,7 @@ export const VERIFY_VALUE_SCHEMA = {
  * @property {string[]} limitations 本校验的已知局限
  * @property {string[]} verifiedKeywords 经回验确实出现的关键词
  * @property {string[]} unverifiedKeywords 声称覆盖但未出现的关键词
+ * @property {string[]} provenanceNotes 溯源表（每条量化主张 → 原文出处）
  */
 
 /**
@@ -333,6 +344,21 @@ export function buildVerifyValue({ original, rewritten, claimedKeywords } = {}) 
     limitations: report.limitations,
     verifiedKeywords: report.coverage?.verified ?? [],
     unverifiedKeywords: report.coverage?.unverified ?? [],
+    // 溯源表：把守卫已做过的判定从布尔展开成"数值 → 原文出处"的证据链。
+    // 【为什么用字符串而非对象】平台 schema 白名单不允许嵌套对象数组
+    // （见 VERIFY_VALUE_SCHEMA 的说明），故投影成可读文本行。
+    // 【为什么它不参与 ok 判定】它是**输出层**，与 findings 同源；
+    // 若另立一套判据，两套漂移会制造"守卫说没问题、溯源表说没出处"的假断言。
+    provenanceNotes: report.provenance.numbers.map((row) => {
+      const shown = row.value.length > 24 ? `${row.value.slice(0, 24)}…` : row.value
+      if (row.status === 'untraced') {
+        return `✘ ${shown} ← 无出处（须人工确认）`
+      }
+      if (row.status === 'dropped') {
+        return `⚠ ${shown} ← 原文的「${row.source ?? '未知条目'}」，改写后消失`
+      }
+      return `✔ ${shown} ← ${row.source ?? '原文'}`
+    }),
   }
 }
 
@@ -380,6 +406,11 @@ export function createVerifyToolDefinition() {
           lines.push('', '关键词回验（自报 ≠ 事实）：')
           if (verified.length > 0) lines.push(`- 已证实出现在简历中：${verified.join('、')}`)
           if (unverified.length > 0) lines.push(`- 声称覆盖但未出现：${unverified.join('、')}`)
+        }
+        const provenance = Array.isArray(value?.provenanceNotes) ? value.provenanceNotes : []
+        if (provenance.length > 0) {
+          lines.push('', '溯源表（每个量化主张 → 原文出处，供人工核对）：')
+          for (const item of provenance) lines.push(`- ${item}`)
         }
         const limits = Array.isArray(value?.limitations) ? value.limitations : []
         if (limits.length > 0) {
