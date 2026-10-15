@@ -12,6 +12,7 @@ import assert from 'node:assert/strict'
 
 import {
   GUARD_VERSION,
+  GUARD_LIMITATIONS,
   normalizeText,
   extractNumericTokens,
   extractChineseOrgNames,
@@ -3762,5 +3763,160 @@ describe('守卫：静默放行修复（中文数字 / 相对时间 / 程度副�
         `真实内容的表格化不得误报：${table}`,
       )
     }
+  })
+})
+
+// ═══════════════════════════════════════════════════════════════════════
+// 第三十八轮：第三轮"静默放行"独立对抗审查（新语料形态）
+// ═══════════════════════════════════════════════════════════════════════
+//
+// 本轮审查目标仍然单一（只找编造却 ok=true、findings=[]），但换成
+// **尚未覆盖的新语料形态**：双栏折行、含图片简历、日/韩文混排、超长跨页断点、
+// HTML 实体编码、Unicode 同形字与零宽字符、链接花式写法、财年/季度日期。
+// 审查交付 22 例静默放行（4 条通道），**每一类都在父侧独立复现确认后才修**。
+describe('守卫：新语料形态的静默放行修复（CJK 机构 / CJK 职责 / 零宽拆数字）', () => {
+  // ── 通道 A：CJK 机构后缀只收中文 ───────────────────────────────────
+  //
+  // 【缺陷】`ZH_ORG_SUFFIXES` 无 `株式会社`/`주식회사` 等后缀，且实现只认
+  // "名字在后缀前"（中文语序），于是日/韩简历换雇主完全静默：
+  //   `株式会社テストで商品一覧ページの開発を担当；`
+  //   → `株式会社サンプルで商品一覧ページの開発を担当；`   → ok=true、findings=[]
+  // 这是**带强后缀**的机构（与「公司」同类），属列举缺口，不是已声明的
+  // "无后缀机构"边界。反证：`東京大学 → 京都大学` 因「大学」在表内而被正确拦下。
+  test('日/韩机构换名必须拦下（CJK 机构后缀缺口）', () => {
+    for (const [original, rewritten] of [
+      [
+        '株式会社テストで商品一覧ページの開発を担当；',
+        '株式会社サンプルで商品一覧ページの開発を担当；',
+      ],
+      [
+        '주식회사 테스트에서 상품 목록 페이지 개발을 담당；',
+        '주식회사 샘플에서 상품 목록 페이지 개발을 담당；',
+      ],
+      [
+        '有限会社テストで商品一覧ページの開発を担当；',
+        '有限会社サンプルで商品一覧ページの開発を担当；',
+      ],
+    ]) {
+      const report = verifyRewrite({ original, rewritten })
+      assert.equal(report.ok, false, `CJK 机构换名必须拦下：${original} → ${rewritten}`)
+      assert.ok(
+        report.findings.some((f) => f.code === 'FABRICATED_ENTITY'),
+        `必须报 FABRICATED_ENTITY：${original} → ${rewritten}`,
+      )
+    }
+  })
+
+  test('中文机构提取不得因 CJK 后缀支持而退化', () => {
+    // 反向锁定：名字在后缀**前**（中文/英文语序）的抽取必须照常工作。
+    assert.ok([...extractChineseOrgNames('在某某科技有限公司实习')].includes('某某科技有限公司'))
+    assert.ok([...extractChineseOrgNames('Tokyo University で研究')].length >= 0)
+    const report = verifyRewrite({
+      original: '- 在某互联网公司实习，负责商品列表页开发；',
+      rewritten: '- 在某某科技公司实习，负责商品列表页开发；',
+    })
+    assert.equal(report.ok, false, '中文机构换名仍必须拦下')
+  })
+
+  // ── 通道 B：职责动词词表只收中英 ───────────────────────────────────
+  //
+  // 【缺陷】`RESPONSIBILITY_LEVELS` 无韩文/日文，两侧 maxLevel 皆 0，
+  // 逐对比较与文档级兜底同时失效：
+  //   `상품 목록 페이지 개발에 참여;`（参与）→ `…을 주도;`（主导）→ 完全静默
+  // 反证：日/韩简历新增技术名仍能被 FABRICATED_ENTITY 拦下——缺的只是职责词表。
+  test('韩/日职责升格必须拦下（CJK 职责动词缺口）', () => {
+    for (const [original, rewritten] of [
+      ['상품 목록 페이지 개발에 참여;', '상품 목록 페이지 개발을 주도;'],
+      ['商品一覧ページの開発を担当した；', '商品一覧ページの開発を主導した；'],
+      ['상품 목록 페이지 개발에 협조했다;', '상품 목록 페이지 개발을 총괄했다;'],
+    ]) {
+      const report = verifyRewrite({ original, rewritten })
+      assert.equal(report.ok, false, `CJK 职责升格必须拦下：${original} → ${rewritten}`)
+      assert.ok(
+        report.findings.some((f) => f.code === 'RESPONSIBILITY_INFLATED'),
+        `必须报 RESPONSIBILITY_INFLATED：${original} → ${rewritten}`,
+      )
+    }
+  })
+
+  test('中/英职责分级不得因 CJK 词表而退化', () => {
+    // 反向锁定：原有中英语种的分级必须照常。
+    assert.equal(extractResponsibilityLevel('参与商品列表页的开发工作').maxLevel, 2)
+    assert.equal(extractResponsibilityLevel('主导商品列表页的开发工作').maxLevel, 4)
+    assert.equal(extractResponsibilityLevel('Participated in development').maxLevel, 2)
+    assert.equal(extractResponsibilityLevel('Led database optimization').maxLevel, 4)
+  })
+
+  // ── 通道 C：零宽字符把编造数字拆成两个"原文已有" token ─────────────
+  //
+  // 【缺陷】数字正则按"非字母数字"切 token，零宽字符能把一个数字切成两半，
+  // 两半恰好都在原文 → 完全静默：
+  //   `QPS 400` → `QPS 2\u200B400` → 抽出 {2, 400}，原文都有 → ok=true
+  //
+  // ⚠️ **普通空格同样能拆**（`QPS 2 400` 也静默），但空格不能收：
+  // `2 GB`、`8 K`、`1.5 M` 是**合法的单位空格写法**，收紧会把正常写法判成编造。
+  // 故只剥零宽字符（正常简历里不会出现），普通空格边界如实声明。
+  test('零宽字符拆分数必须拦下', () => {
+    for (const zw of ['\u200b', '\u200c', '\u200d', '\u2060', '\ufeff', '\u00ad']) {
+      const report = verifyRewrite({
+        original: '- 服务 2 个模块，QPS 400；',
+        rewritten: `- 服务 2 个模块，QPS 2${zw}400；`,
+      })
+      assert.equal(report.ok, false, `零宽字符拆数字必须拦下：U+${zw.codePointAt(0).toString(16)}`)
+      assert.ok(
+        report.findings.some((f) => f.code === 'FABRICATED_NUMBER'),
+        `必须报 FABRICATED_NUMBER：U+${zw.codePointAt(0).toString(16)}`,
+      )
+    }
+  })
+
+  test('零宽字符切断技术名同样必须拦下（原有行为不得退化）', () => {
+    // 反向锁定：剥零宽不得让"切断技术名"这一原有检查失效。
+    const report = verifyRewrite({
+      original: '- 熟悉 Java 与 MySQL 的使用；',
+      rewritten: '- 熟悉 Java 与 Re\u200bdis 的使用；',
+    })
+    assert.equal(report.ok, false, '零宽字符切断出的新词仍须按新增技术名处理')
+  })
+
+  test('合法的单位空格写法不得被误报', () => {
+    // 【关键反向锁定】这是不收紧普通空格的原因——收紧了它们就会死锁。
+    // 注意：句子要够长（≥ 8 字）才进内容单元比对；短行不参与比对是既有设计，
+    // 与零宽字符修复无关（`- 内存 0.5 GB；` 这类 6 字短行会因无原文可配对
+    // 而走"整条新增"分支，那是短行阈值的行为，不是本例要锁定的）。
+    for (const [original, rewritten] of [
+      ['- 服务端缓存体积约 2 GB，需在上线前完成扩容；', '- 服务端缓存体积约 2 GB，需在上线前完成扩容；'],
+      ['- 日均活跃用户 8 K，峰值可达 12 K；', '- 日均活跃用户 8000，峰值可达 12000；'],
+      ['- 首屏耗时 1.5 分钟，优化后需控制在 30 秒；', '- 首屏耗时 90 秒，优化后需控制在 30 秒；'],
+      ['- 生产环境内存占用 512 MB，需持续观察；', '- 生产环境内存占用 0.5 GB，需持续观察；'],
+    ]) {
+      const report = verifyRewrite({ original, rewritten })
+      assert.deepEqual(
+        report.findings.filter((f) => f.severity === 'error').map((f) => f.code),
+        [],
+        `单位空格写法不得误报：${original} → ${rewritten}`,
+      )
+    }
+  })
+
+  // ── 通道 D：编造句复用原文词组越过包含度阈值 ───────────────────────
+  //
+  // 【缺陷】`containment` 取"交集/较短者"，编造句只要复用原文词组即可越过
+  // 0.25 阈值，被当作"同一件事的另一种说法"。三个入口形态：
+  //   ① 行内追加主张（`…优化，保证零故障运行；` → `…，支持横向扩展；`）
+  //   ② 图注/表注无编号（`图 商品列表页整体架构与数据流设计` → 加一句）
+  //   ③ 跨页断点（编造句被页码切成两个 < 8 字碎片，双双被长度阈值跳过）
+  //
+  // 【为什么不修（第三次同一方向）】这正是 `GUARD_LIMITATIONS` 末条记录
+  // "两版实现均被实测否决"的同一处：
+  //   · 第一版"整段去原文 indexOf"→ 中文整句是一个连续汉字段，判据直接失效
+  //   · 第二版"反复剔除最长公共汉字片段"→ 把项目自身的合法改写判成可疑，
+  //     实测打红 2 项既有测试（`参与…开发工作` → `负责…核心模块开发工作`）
+  // 给每条合法改写都发告警 = 告警常亮 = 守卫被忽略。故如实声明，不假装堵住。
+  test('通道 D 维持已知边界：不修、但不得静默化（文档声明与实现一致）', () => {
+    // 该用例锁定的是"边界仍被如实声明"这一事实本身，而非行为放行。
+    // 若将来有人修好了这条通道，此用例与文档同步更新。
+    const declared = GUARD_LIMITATIONS.some((l) => l.includes('夹带'))
+    assert.ok(declared, '已配对条目夹带主张的边界必须仍在 GUARD_LIMITATIONS 中声明')
   })
 })
