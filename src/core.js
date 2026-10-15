@@ -209,10 +209,11 @@ export const VERIFY_VALUE_SCHEMA = {
       type: 'array',
       items: { type: 'string' },
       description:
-        '溯源表（每条量化主张 → 原文出处）。格式为「数值 ← 出处条目」；' +
-        '找不到出处的标「← 无出处（须人工确认）」。' +
-        '**这是给用户核对用的证据链**，不是新的拦截判据——' +
-        '与 findings 同源（同一套归一化与配对），不得据此推翻校验结论。',
+        '量化数据核对结果（面向用户，每条带"该怎么办"）。' +
+        '会把改写里的数字与原简历逐条对照：找不到出处的、原文有但丢失的会明确列出并给出处理方式；' +
+        '全部正常时给出一句确认与逐条对照。' +
+        '**这是给用户核对用的证据，不是新的拦截判据**——' +
+        '与 findings 同源（同一套数值归一化与配对），不得据此推翻校验结论。',
     },
   },
   required: [
@@ -349,16 +350,64 @@ export function buildVerifyValue({ original, rewritten, claimedKeywords } = {}) 
     // （见 VERIFY_VALUE_SCHEMA 的说明），故投影成可读文本行。
     // 【为什么它不参与 ok 判定】它是**输出层**，与 findings 同源；
     // 若另立一套判据，两套漂移会制造"守卫说没问题、溯源表说没出处"的假断言。
-    provenanceNotes: report.provenance.numbers.map((row) => {
-      const shown = row.value.length > 24 ? `${row.value.slice(0, 24)}…` : row.value
-      if (row.status === 'untraced') {
-        return `✘ ${shown} ← 无出处（须人工确认）`
+    provenanceNotes: (() => {
+      // 【呈现层设计（第二版，可用性返工）】
+      //
+      // 第一版是开发者视角的审计日志：
+      //   `- ✔ 80000 ← 负责商品列表页开发…`
+      // 实测发现三个问题，都是"用户看不懂"：
+      //   1. 左边 `80000`、右边原文写 `8 万` —— 要求用户自己做换算，
+      //      而那正是他在这个环节最不想做的事
+      //   2. 「溯源表」「量化主张」「untraced」是黑话，求职者不知道是什么
+      //   3. `✘ 须人工确认` 没说**他该做什么**
+      //
+      // 第二版按"用户视角"重写，三条原则：
+      //   · **两侧写法都显示原文样式**，并列成 `8 万 → 80000`，一眼可对照
+      //   · **问题在前、正常项汇总在后**，不把全绿清单糊给用户
+      //   · 每条问题都带**一句该怎么办**
+      const rows = report.provenance.numbers
+      /** @type {string[]} */
+      const lines = []
+
+      const bad = rows.filter((r) => r.status === 'untraced')
+      const lost = rows.filter((r) => r.status === 'dropped')
+      const okRows = rows.filter((r) => r.status === 'traced')
+
+      if (bad.length > 0) {
+        lines.push(`❗ 有 ${bad.length} 处数字在你的原简历里找不到，请确认是否真实：`)
+        for (const r of bad) {
+          lines.push(`   · 「${r.value}」— 原简历里没有这个数字`)
+        }
+        lines.push('   处理方式：如果它不是真的，删掉或改回原简历的写法；')
+        lines.push('   如果确实是你做过但没写进原简历的，请先把它补进原简历再改。')
       }
-      if (row.status === 'dropped') {
-        return `⚠ ${shown} ← 原文的「${row.source ?? '未知条目'}」，改写后消失`
+
+      if (lost.length > 0) {
+        lines.push(`⚠ 有 ${lost.length} 处原简历里的数字，改写后不见了：`)
+        for (const r of lost) {
+          lines.push(`   · 原来写的「${r.originalForm ?? r.value}」现在没有了`)
+        }
+        lines.push('   处理方式：除非你是故意精简，否则建议保留——真实数据最有说服力。')
       }
-      return `✔ ${shown} ← ${row.source ?? '原文'}`
-    }),
+
+      if (bad.length === 0 && lost.length === 0 && okRows.length > 0) {
+        lines.push(
+          `✅ 简历里的 ${okRows.length} 处数字都能在你的原简历里找到出处，逐条对照如下：`,
+        )
+        for (const r of okRows) {
+          const from = r.originalForm ?? r.value
+          lines.push(
+            from === r.value
+              ? `   · ${r.value}（原简历也是这么写的）`
+              : `   · ${from} → ${r.value}（改成了另一种写法，数值没变）`,
+          )
+        }
+      } else if (okRows.length > 0) {
+        lines.push(`（另有 ${okRows.length} 处数字能在原简历里找到出处，无问题。）`)
+      }
+
+      return lines
+    })(),
   }
 }
 
@@ -409,8 +458,7 @@ export function createVerifyToolDefinition() {
         }
         const provenance = Array.isArray(value?.provenanceNotes) ? value.provenanceNotes : []
         if (provenance.length > 0) {
-          lines.push('', '溯源表（每个量化主张 → 原文出处，供人工核对）：')
-          for (const item of provenance) lines.push(`- ${item}`)
+          lines.push('', ...provenance)
         }
         const limits = Array.isArray(value?.limitations) ? value.limitations : []
         if (limits.length > 0) {

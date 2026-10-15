@@ -2940,11 +2940,18 @@ function appearsIn(candidate, haystack) {
 
 /**
  * 溯源表的一行：一个数值 token 的溯源结果。
+ *
+ * 【字段为什么这样设计（可用性，经实测修正）】
+ * 用户要的是**两侧对照**——「原文写 8 万，改写后写 80000」一眼能确认是同个数。
+ * 故同时带 `originalForm`（原文写法）与 `value`（改写后写法），
+ * 而不是只给一个归一化值让用户自己做换算。
  * @typedef {object} ProvenanceRow
- * @property {string} value 归一化后的数值 token（如 `80000`、`size:536870912`）
+ * @property {string} value 改写后的**可读写法**（如 `80000`、`2400ms`）
+ * @property {string | null} originalForm 原文里的**可读写法**（如 `8 万`、`2.4s`）；
+ *   新增数字（untraced）时为 null 表示"原文根本没有"
  * @property {string | null} unit 单位族标识（当前预留，数字条目为 null）
  * @property {'traced' | 'untraced' | 'dropped'} status
- *   `traced` 原文有等价数值且已定位到条目；`untraced` 原文找不到（须人工确认）；
+ *   `traced` 原文有等价数值且已定位到条目；`untraced` 原文找不到（须用户确认）；
  *   `dropped` 原文有、改写里消失了（提醒别丢真实数据）
  * @property {string | null} source 出处的原文条目；untraced 时为 null
  */
@@ -2987,13 +2994,13 @@ function appearsIn(candidate, haystack) {
  * 都走同一条归一化路径，已被守卫放行；此处只是把"放行/拦下"的原因摊开给人看。
  *
  * @param {{ original?: unknown, rewritten?: unknown }} [args]
- * @returns {{ numbers: Array<{ value: string, unit: string | null, status: 'traced' | 'untraced' | 'dropped', source: string | null }> }}
+ * @returns {{ numbers: ProvenanceRow[] }}
  */
 export function buildProvenance({ original, rewritten } = {}) {
   const originalText = normalizeText(original)
   const rewrittenText = normalizeText(rewritten)
 
-  /** @type {Array<{ value: string, unit: string | null, status: 'traced' | 'untraced' | 'dropped', source: string | null }>} */
+  /** @type {ProvenanceRow[]} */
   const numbers = []
   if (rewrittenText === '') return { numbers }
 
@@ -3019,18 +3026,21 @@ export function buildProvenance({ original, rewritten } = {}) {
   }
 
   /**
-   * 取出 token 在**原文文本里的原始写法**（`8000` → `8 万`、`time:2.4` → `2.4s`）。
+   * 取出 token 在某段文本里的**原始写法**（`8000` → `8 万`、`time:2.4` → `2.4s`）。
    *
-   * 【为什么必须展示原写法】归一化 token 是内部形式（`time:2.4`、`size:536870912`），
-   * 用户看不懂；而"出处条目"已经给出了上下文，token 再显示成原文写法才能一眼对上。
-   * 展示用**改写侧**的出现形式（用户核对的是改写文本），找不到则退回归一化值。
+   * 【为什么必须展示原写法（可用性，实测）】
+   * 归一化 token 是内部形式（`time:2.4`、`size:536870912`），**用户看不懂**；
+   * 而且用户需要的是**两侧对照**：
+   *   「8 万 → 80000」一眼能看出是同一个数
+   *   「80000 ← 8 万」则要用户自己做换算 —— 而那正是他在这个环节最不想做的事。
+   * @param {string} text 在哪段文本里找（原文或改写）
    * @param {string} token 归一化数值 token
-   * @returns {string} 可读的数值写法
+   * @returns {string} 该文本里的可读写法；找不到则退回归一化值的数字部分
    */
-  const surfaceForm = (token) => {
+  const surfaceFormIn = (text, token) => {
     const digits = token.replace(/^\w+:/, '')
     const re = new RegExp(`\\d[\\d,.]*\\s*(?:亿|万|千|[KMB])?`, 'g')
-    for (const m of rewrittenText.matchAll(re)) {
+    for (const m of text.matchAll(re)) {
       const raw = m[0]
       const normalized = [...extractNumericTokens(raw)][0]
       if (normalized === token) return raw.trim()
@@ -3061,19 +3071,36 @@ export function buildProvenance({ original, rewritten } = {}) {
   for (const token of rewrittenNumbers) {
     // 跳过技术名内的数字（`Vue2` 的 2）——不是量化主张，列出来只是噪声
     if (isPartOfTechName(token)) continue
-    const shown = surfaceForm(token)
     const found = locate(token)
     if (originalNumbers.has(token) || found !== null) {
-      numbers.push({ value: shown, unit: null, status: 'traced', source: found })
+      numbers.push({
+        value: surfaceFormIn(rewrittenText, token),
+        originalForm: surfaceFormIn(originalText, token),
+        unit: null,
+        status: 'traced',
+        source: found,
+      })
       continue
     }
-    numbers.push({ value: shown, unit: null, status: 'untraced', source: null })
+    numbers.push({
+      value: surfaceFormIn(rewrittenText, token),
+      originalForm: null,
+      unit: null,
+      status: 'untraced',
+      source: null,
+    })
   }
 
   for (const token of originalNumbers) {
     if (rewrittenNumbers.has(token)) continue
     if (isPartOfTechName(token)) continue
-    numbers.push({ value: surfaceForm(token), unit: null, status: 'dropped', source: locate(token) })
+    numbers.push({
+      value: surfaceFormIn(rewrittenText, token),
+      originalForm: surfaceFormIn(originalText, token),
+      unit: null,
+      status: 'dropped',
+      source: locate(token),
+    })
   }
 
   return { numbers }

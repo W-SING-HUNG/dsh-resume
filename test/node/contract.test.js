@@ -451,3 +451,76 @@ describe('工具 description 与实现同步', () => {
     )
   })
 })
+
+// ── 量化数据核对：**呈现层**必须说人话（第二版可用性返工）──────────────
+//
+// 【为什么单独锁定呈现层，而不只锁数据层】
+// 第一版把溯源表渲染成开发者视角的审计日志：
+//   `- ✔ 80000 ← 负责商品列表页开发…`
+// 它**技术上正确**、测试也全绿，但用户看不懂：要求他自己把 `8 万` 换算成
+// `80000`，术语是「溯源表/量化主张」，且没说他该做什么。
+// —— 这与本项目"告警要能被行动、否则等于没有"的原则同源。
+// 故本组用例锁的是**用户读到的那段话**，不是内部数据结构。
+describe('量化数据核对的呈现层（面向用户，必须可行动）', () => {
+  const ORIGINAL = [
+    '# 张三',
+    '## 项目经历',
+    '- 负责商品列表页开发，性能提升 40%，服务 8 万用户；',
+    '- 使用 Vue2 完成登录模块，接口响应从 2.4s 降到 1.8s。',
+  ].join('\n')
+
+  /** 取渲染文本（去掉很长的「已知边界」段，只留下用户首先看到的部分） */
+  const renderHead = (rewritten) => {
+    const def = createVerifyToolDefinition()
+    const value = buildVerifyValue({ original: ORIGINAL, rewritten })
+    const text = def.output.render({}, value)[0].text
+    const at = text.indexOf('本校验的已知边界')
+    return at < 0 ? text : text.slice(0, at)
+  }
+
+  test('数字换写法时，两侧写法必须并列展示（不让用户自己做换算）', () => {
+    // `8 万 → 80000` 一眼可对照；只给 `80000` 则用户要自己换算。
+    const out = renderHead(ORIGINAL.replace('服务 8 万用户', '服务 80000 用户'))
+    assert.match(out, /8 万/, '必须显示原简历的写法')
+    assert.match(out, /80000/, '必须显示改写后的写法')
+    assert.match(out, /8 万\s*→\s*80000|80000\s*←\s*8 万/, '两种写法必须并列可对照')
+  })
+
+  test('不得出现内部术语（溯源表/量化主张/traced/untraced）', () => {
+    // 这些词是给开发者看的，求职者不知道是什么。
+    const out = renderHead(ORIGINAL.replace('服务 8 万用户', '服务 80000 用户'))
+    for (const jargon of ['溯源表', '量化主张', 'traced', 'untraced', 'normalize']) {
+      assert.ok(!out.includes(jargon), `面向用户的输出不得出现内部术语「${jargon}」`)
+    }
+  })
+
+  test('编造数字必须给出"该怎么办"，而不只是断言有问题', () => {
+    const out = renderHead(ORIGINAL.replace('服务 8 万用户；', '服务 8 万用户，QPS 提升 300%；'))
+    assert.match(out, /300/, '必须指出具体是哪个数字')
+    assert.match(out, /找不到|没有这个数字/, '必须说明它在原简历里找不到')
+    assert.match(out, /处理方式|删掉|改回|补进/, '必须给出可执行的处理方式')
+  })
+
+  test('丢失的真实数据必须给出"该怎么办"', () => {
+    const out = renderHead('# 张三\n## 项目经历\n- 负责商品列表页开发，性能提升 40%；')
+    assert.match(out, /8 万/, '必须指出丢的是哪个数字（用原写法）')
+    assert.match(out, /处理方式|保留|精简/, '必须给出可执行的处理方式')
+  })
+
+  test('全部正常时给出正向确认，且逐条对照', () => {
+    // 用户最常见的场景是"没问题"——此时必须有明确的正向反馈，
+    // 而不是一片空白或只有一句泛泛的"校验通过"。
+    const out = renderHead(ORIGINAL)
+    assert.match(out, /都能在你|都能在.*原简历|找到出处/, '必须正向确认"都能找到出处"')
+    assert.match(out, /40/, '必须逐条列出核对结果')
+  })
+
+  test('技术名里的数字（Vue2 的 2）不得出现在核对清单里', () => {
+    // 噪声会让用户忽略真正的证据链（"告警常亮 = 守卫被忽略"的同款教训）。
+    const out = renderHead(ORIGINAL)
+    assert.ok(
+      !/·\s*2\s*[（(]/.test(out) && !/「2」/.test(out),
+      'Vue2 的 2 不是量化数据，不得列进核对清单',
+    )
+  })
+})
