@@ -45,20 +45,21 @@
 ### 安装
 
 ```bash
-# 1. 放入 DSH 插件目录（$DSH_HOME 默认 ~/.dsh）
-#    把 dsh-resume 放到 $DSH_HOME/plugins/dsh-resume
+# 装进目标 profile（把 <repo> 换成你的本地仓库路径或 npm 包名）
+dsh plugin --profile web add "file:<repo>"
 
-# 2. 装进目标 profile（pnpm 语义）
-dsh plugin --profile web add "file:///$DSH_HOME/plugins/dsh-resume"
-
-# 3. 在 profile 的 package.json 中把插件加入 bundles
-#    $DSH_HOME/profiles/web/package.json → dsh.profile.bundles 追加 "dsh-resume"
-
-# 4. 重启
+# 重启
 dsh web
 ```
 
-仅装依赖不够——必须出现在 `dsh.profile.bundles` 里，加载器才会应用它的 patch。
+**一条命令即可**：CLI 会自动把插件写进 profile 的 `dependencies` 与
+`dsh.profile.bundles` 两处（已实测），无需手工编辑任何文件。
+装完在会话里说「帮我根据这个岗位优化简历」即可，模型会自动调用本插件的工具。
+
+> ⚠️ **路径含空格时 pnpm 会报错**（`Could not install from "D:/..."`）。
+> 这是 pnpm 对 `file:` 路径的限制，不是本插件的问题。
+> 解法二选一：把仓库放到不含空格的路径（如 `C:\dsh-resume`）后再装，
+> 或改用 npm 包名安装。
 
 ### 使用
 
